@@ -7,6 +7,7 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using MCLauncher.App.ViewModels.Mvvm;
 using MCLauncher.Core.Models;
+using MCLauncher.Core.Services;
 using MCLauncher.Core.Services.Auth;
 
 namespace MCLauncher.App.ViewModels;
@@ -48,6 +49,15 @@ public sealed class AccountItem : ViewModelBase
     public string XboxName => Account.IsMicrosoft
         ? string.IsNullOrWhiteSpace(Account.XboxName) ? "未获取" : Account.XboxName!
         : "无";
+
+    /// <summary>账号已被判定失效：整行置灰，只能删除或重新登录。</summary>
+    public bool IsDisabled => Account.IsDisabled;
+
+    /// <summary>离线账号没有可校验的令牌，不显示行内检查按钮。</summary>
+    public bool CanCheck => Account.Kind != AccountKind.Offline;
+
+    /// <summary>失效原因，鼠标悬停时提示。</summary>
+    public string DisabledReasonText => Account.DisabledReason ?? "账号已失效，请重新登录";
 
     public string AccountTypeText => Account.Kind switch
     {
@@ -104,11 +114,14 @@ public sealed class AccountsViewModel : ViewModelBase
     private readonly AsyncRelayCommand _addServerCommand;
     private readonly AsyncRelayCommand _resetSkinCommand;
     private readonly AsyncRelayCommand _reloadSkinCommand;
+    private readonly AsyncRelayCommand _checkAllCommand;
+    private readonly AsyncRelayCommand<AccountItem> _checkAccountCommand;
     private readonly AvatarService _avatars;
 
     private string _newAccountName = string.Empty;
     private string _statusText = "选择左侧任意方式添加账号。";
     private bool _isBusy;
+    private bool _isCheckingAccounts;
     private CancellationTokenSource? _loginCts;
     private string? _deviceCodeText;
     private string? _deviceCodeLink;
@@ -189,6 +202,12 @@ public sealed class AccountsViewModel : ViewModelBase
         _reloadSkinCommand = new AsyncRelayCommand(LoadProfileAsync);
         ReloadSkinCommand = _reloadSkinCommand;
 
+        _checkAllCommand = new AsyncRelayCommand(CheckAllAsync, () => !IsCheckingAccounts);
+        CheckAllCommand = _checkAllCommand;
+
+        _checkAccountCommand = new AsyncRelayCommand<AccountItem>(CheckAccountAsync, _ => !IsCheckingAccounts);
+        CheckAccountCommand = _checkAccountCommand;
+
         _stack.Changed += (_, _) => UiThread.Post(Refresh);
 
         RefreshAuthServers();
@@ -222,6 +241,23 @@ public sealed class AccountsViewModel : ViewModelBase
             }
         }
     }
+
+    /// <summary>正在检查账号可用性；期间禁用检查按钮，避免重复请求。</summary>
+    public bool IsCheckingAccounts
+    {
+        get => _isCheckingAccounts;
+        private set
+        {
+            if (SetProperty(ref _isCheckingAccounts, value))
+            {
+                OnPropertyChanged(nameof(CanCheckAccounts));
+                _checkAllCommand.RaiseCanExecuteChanged();
+                _checkAccountCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool CanCheckAccounts => !IsCheckingAccounts;
 
     // ---------------------------------------------------------------- 对话框状态
 
@@ -277,12 +313,26 @@ public sealed class AccountsViewModel : ViewModelBase
             if (SetProperty(ref _selectedAccountItem, value))
             {
                 OnPropertyChanged(nameof(CanPersonalize));
+                OnPropertyChanged(nameof(CanSetCurrent));
             }
         }
     }
 
-    /// <summary>只有微软账户能打开换肤界面。</summary>
-    public bool CanPersonalize => SelectedAccountItem?.Account.IsMicrosoft == true;
+    /// <summary>
+    /// 「个性化」作用于手动选中的账号行；没有手动选行时作用于当前账号。
+    /// 只有微软账户且未失效时才可用。
+    /// </summary>
+    public bool CanPersonalize =>
+        PersonalizeTarget is { Account.IsMicrosoft: true, Account.IsDisabled: false };
+
+    /// <summary>个性化目标：优先手动选中的行，其次当前账号。</summary>
+    private AccountItem? PersonalizeTarget =>
+        SelectedAccountItem
+        ?? Accounts.FirstOrDefault(item =>
+            string.Equals(item.Account.Uuid, _stack.Accounts.Selected?.Uuid, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>失效账号不能设为当前，只能删除或重新登录。</summary>
+    public bool CanSetCurrent => SelectedAccountItem is { Account.IsDisabled: false };
 
     public bool IsSkinBusy
     {
@@ -504,6 +554,12 @@ public sealed class AccountsViewModel : ViewModelBase
 
     public ICommand ApplyNoCapeCommand { get; }
 
+    /// <summary>检查所有外置/微软账号是否可用（离线账号不检查）。</summary>
+    public ICommand CheckAllCommand { get; }
+
+    /// <summary>检查单行账号是否可用。</summary>
+    public ICommand CheckAccountCommand { get; }
+
     // ---------------------------------------------------------------- 列表刷新
 
     public void Refresh()
@@ -529,11 +585,18 @@ public sealed class AccountsViewModel : ViewModelBase
             }
         }
 
-        // 重建列表会把 ListView 的选中项清空，这里按 UUID 把选中行找回来。
-        SelectedAccountItem = selectedRowUuid is null
-            ? null
-            : Accounts.FirstOrDefault(item =>
-                string.Equals(item.Account.Uuid, selectedRowUuid, StringComparison.OrdinalIgnoreCase));
+        // 重建列表会把 ListView 的选中项清空：优先恢复手动选中的行；
+        // 没有选过行时（例如首次进入账号页）默认选中当前账号，
+        // 这样「个性化」不必先点一下当前账号。
+        var rowUuid = selectedRowUuid ?? selectedUuid;
+        SelectedAccountItem =
+            (rowUuid is null
+                ? null
+                : Accounts.FirstOrDefault(item =>
+                    string.Equals(item.Account.Uuid, rowUuid, StringComparison.OrdinalIgnoreCase)))
+            ?? Accounts.FirstOrDefault(item =>
+                string.Equals(item.Account.Uuid, selectedUuid, StringComparison.OrdinalIgnoreCase))
+            ?? Accounts.FirstOrDefault();
 
         OnPropertyChanged(nameof(HasMsClientId));
         OnPropertyChanged(nameof(MsClientIdHint));
@@ -548,6 +611,103 @@ public sealed class AccountsViewModel : ViewModelBase
         foreach (var entry in _stack.Config.Settings.AuthServers)
         {
             AuthServers.Add(new AuthServerItem { Entry = entry });
+        }
+    }
+
+    // ---------------------------------------------------------------- 账号可用性检查
+
+    /// <summary>检查所有外置登录与微软账号；离线账号不检查。失效账号会被置灰。</summary>
+    private async Task CheckAllAsync()
+    {
+        if (IsCheckingAccounts)
+        {
+            return;
+        }
+
+        IsCheckingAccounts = true;
+        StatusText = "正在检查账号可用性…";
+
+        var usable = 0;
+        var unavailable = 0;
+        var unknown = 0;
+
+        try
+        {
+            var targets = _stack.Accounts.Accounts
+                .Where(a => a.Kind != AccountKind.Offline)
+                .ToList();
+
+            if (targets.Count == 0)
+            {
+                StatusText = "没有需要检查的账号（离线账号不需要检查）";
+                return;
+            }
+
+            foreach (var account in targets)
+            {
+                var result = await _stack.AccountHealth.CheckAsync(account);
+                switch (result.Health)
+                {
+                    case AccountHealth.Usable:
+                        usable++;
+                        break;
+                    case AccountHealth.Unavailable:
+                        unavailable++;
+                        break;
+                    default:
+                        unknown++;
+                        break;
+                }
+            }
+
+            StatusText = unknown > 0
+                ? $"检查完成：{usable} 个可用，{unavailable} 个已失效，{unknown} 个暂时无法检查"
+                : $"检查完成：{usable} 个可用，{unavailable} 个已失效";
+        }
+        catch (Exception ex)
+        {
+            _stack.Log.Error("检查账号可用性失败", ex);
+            StatusText = "检查失败：" + ex.Message;
+        }
+        finally
+        {
+            IsCheckingAccounts = false;
+            Refresh();
+            _stack.RaiseChanged();
+        }
+    }
+
+    /// <summary>检查单个账号；微软账号顺带补上缺失的 Xbox 用户名。</summary>
+    private async Task CheckAccountAsync(AccountItem? item)
+    {
+        if (item is null || IsCheckingAccounts)
+        {
+            return;
+        }
+
+        IsCheckingAccounts = true;
+        StatusText = $"正在检查 {item.Account.Name} …";
+
+        try
+        {
+            var result = await _stack.AccountHealth.CheckAsync(item.Account);
+            StatusText = result.Health switch
+            {
+                AccountHealth.Usable => $"{item.Account.Name}：可用",
+                AccountHealth.Unavailable => $"{item.Account.Name} 已失效，请删除后重新登录",
+                _ => $"{item.Account.Name}：{result.Message}",
+            };
+        }
+        catch (Exception ex)
+        {
+            _stack.Log.Error($"检查账号失败（{item.Account.Name}）", ex);
+            StatusText = $"检查失败：{ex.Message}";
+        }
+        finally
+        {
+            IsCheckingAccounts = false;
+            Refresh();
+            _stack.RaiseChanged();
         }
     }
 
@@ -702,6 +862,12 @@ public sealed class AccountsViewModel : ViewModelBase
             return;
         }
 
+        if (item.Account.IsDisabled)
+        {
+            StatusText = $"账号「{item.Account.Name}」已失效，只能删除或重新登录";
+            return;
+        }
+
         _stack.Accounts.Select(item.Account);
         _stack.Config.Save();
         StatusText = $"已切换账号：{item.Account}";
@@ -767,8 +933,8 @@ public sealed class AccountsViewModel : ViewModelBase
 
     private void OpenPersonalize()
     {
-        var item = SelectedAccountItem;
-        if (item?.Account.IsMicrosoft != true)
+        var item = PersonalizeTarget;
+        if (item is null || item.Account.IsMicrosoft != true || item.Account.IsDisabled)
         {
             return;
         }

@@ -1,4 +1,6 @@
 using MCLauncher.Core.Models;
+using MCLauncher.Core.Services;
+using MCLauncher.Core.Tests.Support;
 using MCLauncher.Core.Utils;
 
 namespace MCLauncher.Core.Tests;
@@ -46,6 +48,47 @@ public sealed class AccountTests
         var account = new Account { Kind = AccountKind.Microsoft, Name = "Steve" };
         Assert.Equal("msa", account.UserType);
         Assert.True(account.IsMicrosoft);
+    }
+
+    [Fact]
+    public void 失效账号会被跳过且重新登录后恢复()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "mcl-accounts-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var log = new TestLog();
+            var config = new ConfigService(
+                new JsonConfigStore(Path.Combine(root, "config"), log),
+                log,
+                includeBuiltInSecrets: false);
+            config.Load();
+
+            var service = new AccountService(config, log);
+            var first = service.AddOffline("First");
+            var second = service.AddOffline("Second");
+
+            service.Select(second);
+            service.SetDisabled(second, true, "令牌已失效");
+
+            // 失效账号不再被视为当前账号，自动落到下一个可用账号。
+            Assert.Equal(first.Uuid, service.Selected?.Uuid);
+
+            // 重新登录成功（标记恢复）后回到原来的当前账号。
+            service.SetDisabled(second, false);
+            Assert.Equal(second.Uuid, service.Selected?.Uuid);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 
     [Fact]

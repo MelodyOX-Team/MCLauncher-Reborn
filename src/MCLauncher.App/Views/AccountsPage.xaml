@@ -128,6 +128,45 @@
                             <Trigger Property="IsSelected" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="#E3F0FA"/>
                             </Trigger>
+                            <!-- 失效账号：整行置灰，仍可删除或点行内刷新重新检查 -->
+                            <DataTrigger Binding="{Binding IsDisabled}" Value="True">
+                                <Setter Property="Foreground" Value="#9A9A9A"/>
+                                <Setter Property="Opacity" Value="0.55"/>
+                            </DataTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsDisabled}" Value="True">
+                    <Setter Property="ToolTip" Value="{Binding DisabledReasonText}"/>
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <!-- 账号行里的图标按钮（刷新可用性） -->
+        <Style x:Key="AccountIconButton" TargetType="Button">
+            <Setter Property="Foreground" Value="#7A7A7A"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd" Background="Transparent" CornerRadius="4" Padding="6,4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#F2F7FD"/>
+                                <Setter Property="Foreground" Value="#2F6FB6"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#E3F0FA"/>
+                            </Trigger>
+                            <Trigger Property="IsEnabled" Value="False">
+                                <Setter Property="Foreground" Value="#C0C0C0"/>
+                            </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
@@ -159,7 +198,7 @@
         </Style>
     </UserControl.Resources>
 
-    <Grid Margin="20,18,20,16">
+    <Grid x:Name="PageRoot" Margin="20,18,20,16">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -263,7 +302,9 @@
                                         Command="{Binding SelectCommand}"
                                         CommandParameter="{Binding SelectedAccountItem}"
                                         Content="设为当前"
-                                        Width="88" Height="28" FontSize="13"/>
+                                        Width="88" Height="28" FontSize="13"
+                                        IsEnabled="{Binding CanSetCurrent}"
+                                        ToolTip="失效账号不能设为当前"/>
                                 <Button Style="{StaticResource SkinButton}"
                                         Command="{Binding RemoveCommand}"
                                         CommandParameter="{Binding SelectedAccountItem}"
@@ -275,6 +316,12 @@
                                         Width="88" Height="28" FontSize="13" Margin="8,0,0,0"
                                         IsEnabled="{Binding CanPersonalize}"
                                         ToolTip="查看和更换皮肤、披风（仅微软账户）"/>
+                                <Button Style="{StaticResource SkinButton}"
+                                        Command="{Binding CheckAllCommand}"
+                                        Content="检查账号"
+                                        Width="88" Height="28" FontSize="13" Margin="8,0,0,0"
+                                        IsEnabled="{Binding CanCheckAccounts}"
+                                        ToolTip="检查所有外置登录与微软账号是否可用；离线账号不需要检查"/>
                             </StackPanel>
                             <TextBlock Text="{Binding StatusText}"
                                        FontSize="12" Foreground="#5A5A5A"
@@ -340,6 +387,20 @@
                                                        VerticalAlignment="Center"
                                                        FontSize="14" FontWeight="Bold"
                                                        Foreground="#2E7D32"/>
+                                        </DataTemplate>
+                                    </GridViewColumn.CellTemplate>
+                                </GridViewColumn>
+                                <GridViewColumn Width="52">
+                                    <GridViewColumn.CellTemplate>
+                                        <DataTemplate>
+                                            <Button Style="{StaticResource AccountIconButton}"
+                                                    Content="&#xE72C;"
+                                                    ToolTip="检查该账号是否可用"
+                                                    HorizontalAlignment="Left" Margin="8,0,0,0"
+                                                    Visibility="{Binding CanCheck, Converter={StaticResource BoolToVis}}"
+                                                    IsEnabled="{Binding DataContext.CanCheckAccounts, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    Command="{Binding DataContext.CheckAccountCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                                                    CommandParameter="{Binding}"/>
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
@@ -502,13 +563,42 @@
             <Border Width="580" Background="White" CornerRadius="8" Padding="18,14"
                     HorizontalAlignment="Center" VerticalAlignment="Center"
                     BorderBrush="#D8D8D8" BorderThickness="1"
+                    MaxHeight="{Binding ActualHeight, ElementName=PageRoot}"
                     Visibility="{Binding IsSkinDialogOpen, Converter={StaticResource BoolToVis}}">
-                <StackPanel>
-                    <TextBlock Text="个性化" FontSize="16" FontWeight="SemiBold"/>
-                    <TextBlock Text="{Binding PersonalizeAccountText}" Margin="0,4,0,0"
-                               Style="{StaticResource BodyText}"/>
+                <DockPanel>
+                    <!-- 标题行：右侧放刷新/关闭，避免底部按钮挤占内容区 -->
+                    <Grid DockPanel.Dock="Top">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
 
-                    <Grid Margin="0,10,0,0">
+                        <StackPanel Grid.Column="0">
+                            <TextBlock Text="个性化" FontSize="16" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding PersonalizeAccountText}" Margin="0,4,0,0"
+                                       Style="{StaticResource BodyText}"/>
+                        </StackPanel>
+
+                        <StackPanel Grid.Column="1" Orientation="Horizontal"
+                                    VerticalAlignment="Top" Margin="12,0,0,0">
+                            <Button Style="{StaticResource SkinButton}" Content="刷新"
+                                    Width="76" Height="28" FontSize="13"
+                                    Command="{Binding ReloadSkinCommand}"
+                                    IsEnabled="{Binding CanInteractSkin}"/>
+                            <Button Style="{StaticResource SkinButton}" Content="关闭"
+                                    Width="76" Height="28" FontSize="13" Margin="8,0,0,0"
+                                    Command="{Binding CloseDialogCommand}"/>
+                        </StackPanel>
+                    </Grid>
+
+                    <TextBlock DockPanel.Dock="Bottom" Text="{Binding SkinStatusText}" Margin="0,8,0,0"
+                               FontSize="12" Foreground="#5A5A5A" TextWrapping="Wrap"
+                               MinHeight="16"/>
+
+                    <!-- 皮肤与披风主体：始终显示竖向滚动条，窗口较矮时可直接拖动 -->
+                    <ScrollViewer Margin="0,10,0,0" VerticalScrollBarVisibility="Visible"
+                                  HorizontalScrollBarVisibility="Disabled">
+                    <Grid>
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="190"/>
                             <ColumnDefinition Width="20"/>
@@ -612,21 +702,8 @@
                             </Grid>
                         </StackPanel>
                     </Grid>
-
-                    <TextBlock Text="{Binding SkinStatusText}" Margin="0,8,0,0"
-                               FontSize="12" Foreground="#5A5A5A" TextWrapping="Wrap"
-                               MinHeight="16"/>
-
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,10,0,0">
-                        <Button Style="{StaticResource SkinButton}" Content="刷新"
-                                Width="76" Height="28" FontSize="13"
-                                Command="{Binding ReloadSkinCommand}"
-                                IsEnabled="{Binding CanInteractSkin}"/>
-                        <Button Style="{StaticResource SkinButton}" Content="关闭"
-                                Width="76" Height="28" FontSize="13" Margin="8,0,0,0"
-                                Command="{Binding CloseDialogCommand}"/>
-                    </StackPanel>
-                </StackPanel>
+                    </ScrollViewer>
+                </DockPanel>
             </Border>
         </Grid>
     </Grid>

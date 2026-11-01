@@ -102,6 +102,9 @@ public sealed class LauncherStack : IDisposable
 
     public required MicrosoftAuthService MicrosoftAuth { get; init; }
 
+    /// <summary>账号可用性检查与启动前令牌准备。</summary>
+    public required AccountHealthService AccountHealth { get; init; }
+
     public required AuthlibAuthService AuthlibAuth { get; init; }
 
     public required AuthlibInjectorService AuthlibInjector { get; init; }
@@ -181,6 +184,8 @@ public sealed class LauncherStack : IDisposable
         var launcher = new GameLauncher(log);
         var authlibAuth = new AuthlibAuthService(downloader, log);
         var authlibInjector = new AuthlibInjectorService(downloader, log);
+        var accounts = new AccountService(config, log);
+        var msAuth = new MicrosoftAuthService(downloader, config, log);
         var profiles = new MinecraftProfileService(downloader, log);
         var resources = new ResourceRepository(log);
         var modpacks = new ModpackImporter(downloader, resolver, resources, log);
@@ -199,7 +204,7 @@ public sealed class LauncherStack : IDisposable
         {
             Log = log,
             Config = config,
-            Accounts = new AccountService(config, log),
+            Accounts = accounts,
             Downloader = downloader,
             Resolver = resolver,
             Batch = batch,
@@ -214,7 +219,8 @@ public sealed class LauncherStack : IDisposable
                 repository, installer, java, argumentBuilder, launcher, authlibAuth, authlibInjector, log),
             Instances = instances,
             ModLoaders = modLoaders,
-            MicrosoftAuth = new MicrosoftAuthService(downloader, config, log),
+            MicrosoftAuth = msAuth,
+            AccountHealth = new AccountHealthService(accounts, msAuth, authlibAuth, config, log),
             AuthlibAuth = authlibAuth,
             AuthlibInjector = authlibInjector,
             Profiles = profiles,

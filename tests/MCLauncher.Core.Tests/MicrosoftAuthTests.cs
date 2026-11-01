@@ -98,13 +98,15 @@ public sealed class MicrosoftAuthTests
             (HttpStatusCode.OK, """{"access_token":"msa-token","refresh_token":"refresh-1","expires_in":3600}"""),
             // 4. Xbox Live
             (HttpStatusCode.OK, """{"Token":"xbl-token","DisplayClaims":{"xui":[{"uhs":"user-hash"}]}}"""),
-            // 5. XSTS
+            // 5. XSTS（Minecraft 依赖方）
             (HttpStatusCode.OK, """{"Token":"xsts-token","DisplayClaims":{"xui":[{"uhs":"user-hash"}]}}"""),
-            // 6. Minecraft 登录
+            // 6. XSTS（Xbox Live 依赖方，用来取玩家代号 gtg）
+            (HttpStatusCode.OK, """{"Token":"xsts-token","DisplayClaims":{"xui":[{"uhs":"user-hash","gtg":"SteveGamer"}]}}"""),
+            // 7. Minecraft 登录
             (HttpStatusCode.OK, """{"access_token":"mc-token","expires_in":86400}"""),
-            // 7. 游戏所有权
+            // 8. 游戏所有权
             (HttpStatusCode.OK, """{"items":[{"name":"product_minecraft"}]}"""),
-            // 8. 玩家档案
+            // 9. 玩家档案
             (HttpStatusCode.OK, """{"id":"5627dd98e6be3c21b8a8e92344183641","name":"Steve"}"""));
 
         using var downloader = new HttpDownloader(log, handler);
@@ -129,12 +131,17 @@ public sealed class MicrosoftAuthTests
         Assert.Equal("Steve", account.Name);
         Assert.Equal("5627dd98e6be3c21b8a8e92344183641", account.Uuid);
         Assert.Equal("user-hash", account.Xuid);
+        // 玩家代号来自第二次 XSTS（http://xboxlive.com 依赖方）
+        Assert.Equal("SteveGamer", account.XboxName);
         Assert.Equal("refresh-1", account.RefreshToken);
 
         // 第二次轮询必须带上 device_code 授权类型
         var pollBody = handler.Bodies.FirstOrDefault(b => b.Contains("device_code", StringComparison.Ordinal));
         Assert.NotNull(pollBody);
         Assert.Contains("urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code", pollBody);
+
+        // 玩家代号必须通过 http://xboxlive.com 依赖方的 XSTS 请求获取
+        Assert.Contains(handler.Bodies, b => b.Contains("http://xboxlive.com", StringComparison.Ordinal));
     }
 
     /// <summary>

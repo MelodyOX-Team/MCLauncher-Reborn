@@ -280,6 +280,9 @@ public sealed class MicrosoftAuthService
         Report(progress, "获取 XSTS 令牌", "正在向 Xbox 安全令牌服务申请令牌");
         var (xstsToken, uhs, gamertag) = await AuthorizeXstsAsync(xblToken, ct).ConfigureAwait(false);
 
+        // Minecraft 的 XSTS 响应通常只有 uhs，玩家代号需要再查一次 Xbox Live 依赖方。
+        gamertag ??= await FetchGamertagAsync(xblToken, ct).ConfigureAwait(false);
+
         Report(progress, "登录 Minecraft", "正在用 Xbox 令牌换取 Minecraft 访问令牌");
         var mcToken = await LoginWithXboxAsync(uhs, xstsToken, ct).ConfigureAwait(false);
 
@@ -436,6 +439,41 @@ public sealed class MicrosoftAuthService
         {
             // XSTS 的失败几乎都靠响应体里的 XErr 才能分辨原因。
             throw MapXboxFailure(ex);
+        }
+    }
+
+    /// <summary>
+    /// 取 Xbox 玩家代号。以 <c>http://xboxlive.com</c> 为 relying party 调一次 XSTS，
+    /// 声明里才会带 <c>gtg</c>（Minecraft 的 relying party 只返回 uhs）。
+    /// 只是展示用，失败不影响登录。
+    /// </summary>
+    private async Task<string?> FetchGamertagAsync(string xblToken, CancellationToken ct)
+    {
+        try
+        {
+            var payload = JsonSerializer.Serialize(new
+            {
+                Properties = new
+                {
+                    SandboxId = "RETAIL",
+                    UserTokens = new[] { xblToken },
+                },
+                RelyingParty = MsAuthEndpoints.XboxProfileRelyingParty,
+                TokenType = "JWT",
+            });
+
+            var json = await _downloader
+                .PostJsonAsync("https://xsts.auth.xboxlive.com/xsts/authorize", payload, null, ct)
+                .ConfigureAwait(false);
+
+            var response = JsonUtil.Deserialize<XblTokenResponse>(json);
+            var gamertag = response?.DisplayClaims?.Xui?.FirstOrDefault()?.GetValueOrDefault("gtg");
+            return string.IsNullOrWhiteSpace(gamertag) ? null : gamertag;
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("获取 Xbox 玩家代号失败（不影响登录）", ex);
+            return null;
         }
     }
 

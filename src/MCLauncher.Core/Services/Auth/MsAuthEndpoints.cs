@@ -25,6 +25,12 @@ public static class MsAuthEndpoints
 
     public const string XstsRelyingParty = "rp://api.minecraftservices.com/";
 
+    /// <summary>
+    /// 取 Xbox 玩家代号用的 XSTS relying party。Minecraft 的 XSTS 响应只有 uhs，
+    /// 换成这个 relying party 再请求一次才会在声明里带上 gtg（玩家代号）。
+    /// </summary>
+    public const string XboxProfileRelyingParty = "http://xboxlive.com";
+
     public const string MinecraftLoginUrl = "https://api.minecraftservices.com/authentication/login_with_xbox";
 
     public const string MinecraftProfileUrl = "https://api.minecraftservices.com/minecraft/profile";

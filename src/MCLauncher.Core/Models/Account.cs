@@ -38,7 +38,10 @@ public sealed class Account
     /// <summary>Xbox 用户 ID（仅微软账号有）。</summary>
     public string? Xuid { get; set; }
 
-    /// <summary>Xbox 玩家代号（仅微软账号有，来自 XSTS 的 gtg；旧数据可能为空）。</summary>
+    /// <summary>
+    /// Xbox 玩家代号（仅微软账号有）。来自以 <c>http://xboxlive.com</c> 为依赖方的 XSTS 声明
+    /// （Minecraft 依赖方的响应里只有 uhs）；旧数据可能为空。
+    /// </summary>
     public string? XboxName { get; set; }
 
     /// <summary>微软 OAuth 刷新令牌（仅微软账号有），落盘时由 DPAPI 加密。</summary>
@@ -57,6 +60,14 @@ public sealed class Account
 
     /// <summary>令牌过期时间。</summary>
     public DateTimeOffset? ExpiresAt { get; set; }
+
+    /// <summary>
+    /// 已被服务器判定为失效（令牌/刷新令牌被拒绝）：界面置灰，只能删除或重新登录，不能设为当前。
+    /// </summary>
+    public bool IsDisabled { get; set; }
+
+    /// <summary>失效原因，界面提示用。</summary>
+    public string? DisabledReason { get; set; }
 
     [JsonIgnore]
     public bool IsMicrosoft => Kind == AccountKind.Microsoft;

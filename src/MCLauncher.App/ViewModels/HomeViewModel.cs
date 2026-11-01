@@ -744,16 +744,31 @@ public sealed class HomeViewModel : ViewModelBase
         try
         {
             var account = _stack.Accounts.Selected
-                          ?? throw new InvalidOperationException("尚未添加账号，请先在「账号」页添加。");
+                          ?? throw new InvalidOperationException("尚未添加可用账号，请先在「账号」页添加。");
 
-            // 外置登录的 accessToken 可能已被服务器注销，启动前先校验/续期。
-            if (account.IsExternal)
+            if (account.IsDisabled)
             {
-                StatusText = "正在验证外置登录…";
-                AppendLaunchLine("正在验证外置登录令牌…");
-                account = await _stack.AuthlibAuth.EnsureValidAsync(account);
-                _stack.Accounts.Upsert(account);
-                _stack.RaiseChanged();
+                throw new InvalidOperationException(
+                    $"账号「{account.Name}」已失效（{account.DisabledReason ?? "需要重新登录"}），"
+                    + "请到「账号」页重新登录或切换账号。");
+            }
+
+            // 外置登录的 accessToken 可能已被服务器注销；微软账号令牌临近过期时自动刷新。
+            if (account.IsMicrosoft || account.IsExternal)
+            {
+                StatusText = account.IsExternal ? "正在验证外置登录…" : "正在验证微软账号…";
+                AppendLaunchLine(StatusText);
+
+                try
+                {
+                    account = await _stack.AccountHealth.PrepareForLaunchAsync(account);
+                }
+                catch (AccountUnavailableException)
+                {
+                    // 账号已被置灰，账号页需要立即反映出来。
+                    _stack.RaiseChanged();
+                    throw;
+                }
             }
 
             _stack.Config.Save();
