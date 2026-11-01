@@ -70,19 +70,23 @@ public sealed class LauncherUpdate
 }
 
 /// <summary>
-/// 启动器自身的公告与版本检查。数据放在项目仓库里：
-/// 公告读 <c>notice.json</c>（官方 raw + jsDelivr 镜像并行竞速，先成功者胜），更新读 GitHub Releases API。
+/// 启动器自身的公告与版本检查：公告读网站仓库（MelodyOX/MelodyOX.github.io）的 notice.json，
+/// 官方 raw + jsDelivr 镜像并行竞速；自动更新读新仓库 MelodyOX-Team/MCLauncher-Reborn 的 Releases。
 /// 所有失败都只记日志并返回 null，启动流程不能因为这两个可选项而中断。
 /// </summary>
 public sealed class LauncherInfoService
 {
-    private const string Repository = "HotWaterFlask/MCLauncher-Reborn";
+    /// <summary>自动更新（Releases）所在仓库。</summary>
+    private const string Repository = "MelodyOX-Team/MCLauncher-Reborn";
+
+    /// <summary>公告与网站内容所在仓库（GitHub Pages 站点）。</summary>
+    private const string NoticeRepository = "MelodyOX/MelodyOX.github.io";
 
     private const string NoticeUrl =
-        "https://raw.githubusercontent.com/" + Repository + "/main/notice.json";
+        "https://raw.githubusercontent.com/" + NoticeRepository + "/main/notice.json";
 
     private const string NoticeMirrorUrl =
-        "https://cdn.jsdelivr.net/gh/" + Repository + "@main/notice.json";
+        "https://cdn.jsdelivr.net/gh/" + NoticeRepository + "@main/notice.json";
 
     private const string LatestReleaseUrl =
         "https://api.github.com/repos/" + Repository + "/releases/latest";
