@@ -1,7 +1,5 @@
 # MCLauncher Reborn
 
-**主仓库**：<https://github.com/MelodyOX-Team/MCLauncher-Reborn>（原作者团队维护）
-
 **Minecraft: Java Edition** 第三方启动器，面向 Windows 桌面端，基于 **.NET 10 + WPF（C#）**。
 
 原「忘却的旋律 Minecraft 启动器」（MCLauncher 5.31）的正统续作：由易语言重构为 C#，并延续原项目的后续更新。界面保留 5.31 的视觉标识——无边框窗口、铺满整窗的背景皮肤、贴角关闭按钮与左下角署名；信息架构扩展为「左侧导航 + 右侧内容区」的多页面布局。
