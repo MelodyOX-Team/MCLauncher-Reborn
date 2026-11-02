@@ -14,7 +14,7 @@ namespace MCLauncher.App.Shell;
 /// </summary>
 public partial class MainWindow : Window
 {
-    private const string ProjectUrl = "https://github.com/HotWaterFlask/MCLauncher-Reborn";
+    private const string ProjectUrl = "https://melodyox.github.io";
 
     /// <summary>DWMWA_WINDOW_CORNER_PREFERENCE</summary>
     private const int DwmWindowCornerPreference = 33;

@@ -70,8 +70,8 @@ public sealed class LauncherUpdate
 }
 
 /// <summary>
-/// 启动器自身的公告与版本检查：公告读网站仓库（MelodyOX/MelodyOX.github.io）的 notice.json，
-/// 官方 raw + jsDelivr 镜像并行竞速；自动更新读新仓库 MelodyOX-Team/MCLauncher-Reborn 的 Releases。
+/// 启动器自身的公告与版本检查：公告直接读网站（GitHub Pages 站点 melodyox.github.io）的
+/// notice.json，gh-proxy 与 GitHub raw 兜底；自动更新读新仓库 MelodyOX-Team/MCLauncher-Reborn 的 Releases。
 /// 所有失败都只记日志并返回 null，启动流程不能因为这两个可选项而中断。
 /// </summary>
 public sealed class LauncherInfoService
@@ -82,11 +82,16 @@ public sealed class LauncherInfoService
     /// <summary>公告与网站内容所在仓库（GitHub Pages 站点）。</summary>
     private const string NoticeRepository = "MelodyOX/MelodyOX.github.io";
 
-    private const string NoticeUrl =
-        "https://raw.githubusercontent.com/" + NoticeRepository + "/main/notice.json";
+    /// <summary>公告主地址：直接读站点，GitHub Pages 发布后立即生效。</summary>
+    private const string NoticeUrl = "https://melodyox.github.io/notice.json";
 
-    private const string NoticeMirrorUrl =
-        "https://cdn.jsdelivr.net/gh/" + NoticeRepository + "@main/notice.json";
+    /// <summary>gh-proxy 加速的仓库原始文件，供访问 raw 不稳定的线路兜底。</summary>
+    private const string NoticeProxyUrl =
+        "https://cdn.gh-proxy.org/https://raw.githubusercontent.com/" + NoticeRepository + "/refs/heads/main/notice.json";
+
+    /// <summary>仓库原始文件兜底；不走 jsDelivr，避免它的 @main 缓存继续返回旧公告。</summary>
+    private const string NoticeGitHubUrl =
+        "https://raw.githubusercontent.com/" + NoticeRepository + "/main/notice.json";
 
     private const string LatestReleaseUrl =
         "https://api.github.com/repos/" + Repository + "/releases/latest";
@@ -109,8 +114,9 @@ public sealed class LauncherInfoService
     {
         var candidates = new[]
         {
-            new DownloadCandidate(NoticeUrl, "GitHub"),
-            new DownloadCandidate(NoticeMirrorUrl, "jsDelivr"),
+            new DownloadCandidate(NoticeUrl, "站点"),
+            new DownloadCandidate(NoticeProxyUrl, "gh-proxy"),
+            new DownloadCandidate(NoticeGitHubUrl, "GitHub"),
         };
 
         try

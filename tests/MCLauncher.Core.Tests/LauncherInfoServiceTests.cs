@@ -205,7 +205,7 @@ public sealed class LauncherInfoServiceTests
         }
     }
 
-    /// <summary>官方 raw 一直挂起（模拟被墙），jsDelivr 镜像正常返回内容。</summary>
+    /// <summary>官方 raw 一直挂起（模拟被墙），站点/镜像正常返回内容。</summary>
     private sealed class HangingOfficialHandler : HttpMessageHandler
     {
         private readonly string _content;
