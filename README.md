@@ -1,8 +1,10 @@
 # MCLauncher Reborn
 
-一个从零实现的 **Minecraft: Java Edition** 第三方启动器，面向 Windows 桌面端，基于 **.NET 10 + WPF**。
+**主仓库**：<https://github.com/MelodyOX-Team/MCLauncher-Reborn>（原作者团队维护）
 
-界面延续原「忘却的旋律 Minecraft 启动器 5.31」的视觉标识——无边框窗口、铺满整窗的背景皮肤、贴角关闭按钮与左下角署名；信息架构扩展为「左侧导航 + 右侧内容区」的多页面布局。
+**Minecraft: Java Edition** 第三方启动器，面向 Windows 桌面端，基于 **.NET 10 + WPF（C#）**。
+
+原「忘却的旋律 Minecraft 启动器」（MCLauncher 5.31）的正统续作：由易语言重构为 C#，并延续原项目的后续更新。界面保留 5.31 的视觉标识——无边框窗口、铺满整窗的背景皮肤、贴角关闭按钮与左下角署名；信息架构扩展为「左侧导航 + 右侧内容区」的多页面布局。
 
 > **当前版本 6.0.0（Reborn）· 开发收尾阶段**
 >
@@ -117,7 +119,7 @@
 ## 构建与运行
 
 ```powershell
-git clone https://github.com/HotWaterFlask/MCLauncher-Reborn.git
+git clone https://github.com/MelodyOX-Team/MCLauncher-Reborn.git
 cd MCLauncher-Reborn
 
 # 构建
@@ -266,7 +268,6 @@ MCLauncher-reborn/
 
 ## 致谢
 
-- 原项目 **MCLauncher（忘却的旋律）**：本项目的界面视觉与使用习惯来源于此，项目为独立重写。
 - **Terracotta（陶瓦联机）**：运行时仅下载并调用其官方二进制（AGPL-3.0），不修改、不重打包、不内置其代码。
 - **SakuraFrp**：运行时下载官方 frpc 客户端，凭据由用户自备。
 - **authlib-injector**：外置登录的注入组件，启动前按官方源下载，失败时回退镜像。
