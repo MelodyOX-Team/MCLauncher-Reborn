@@ -211,7 +211,17 @@ public sealed class ZuluJavaService
             });
 
             TryDelete(staging);
-            await Task.Run(() => ArchiveUtil.ExtractZip(archivePath, staging), ct).ConfigureAwait(false);
+            var blocked = new List<string>();
+            await Task.Run(
+                    () => blocked.AddRange(ArchiveUtil.ExtractZipSkippingBlocked(archivePath, staging)),
+                    ct)
+                .ConfigureAwait(false);
+
+            if (blocked.Count > 0)
+            {
+                // 常见于安全软件拦截向该目录写入 DLL（如 msvcp140.dll）；系统里有同名运行库时 Java 仍可启动。
+                _log.Warn($"解压 Zulu JDK {requiredMajor} 时有 {blocked.Count} 个文件被安全软件拦截：{FormatBlocked(blocked)}");
+            }
 
             var javaExe = Directory
                 .EnumerateFiles(staging, "java.exe", SearchOption.AllDirectories)
@@ -220,7 +230,10 @@ public sealed class ZuluJavaService
 
             if (javaExe is null)
             {
-                throw new InvalidDataException("解压后的 Zulu JDK 里找不到 bin/java.exe");
+                throw new InvalidDataException(blocked.Count > 0
+                    ? $"解压 Zulu JDK {requiredMajor} 时 {blocked.Count} 个文件被安全软件拦截（{FormatBlocked(blocked)}），缺少 bin/java.exe。"
+                      + "请把本启动器加入信任后重试；安装包已缓存，不会重新下载。"
+                    : "解压后的 Zulu JDK 里找不到 bin/java.exe");
             }
 
             if (Directory.Exists(destination))
@@ -243,7 +256,10 @@ public sealed class ZuluJavaService
             if (info is null)
             {
                 TryDelete(destination);
-                throw new InvalidOperationException("Zulu JDK 已解压，但无法通过 Java 探测，可能被安全软件拦截");
+                throw new InvalidOperationException(blocked.Count > 0
+                    ? $"Zulu JDK 已解压，但有 {blocked.Count} 个文件被安全软件拦截（{FormatBlocked(blocked)}），Java 无法启动。"
+                      + "请把本启动器加入信任后重试；安装包已缓存，不会重新下载。"
+                    : "Zulu JDK 已解压，但无法通过 Java 探测，可能被安全软件拦截");
             }
 
             _java.Invalidate();
@@ -252,7 +268,9 @@ public sealed class ZuluJavaService
             _log.Info($"Zulu JDK {requiredMajor} 已安装：{installedJava}");
             progress?.Report(new JavaRuntimeProgress
             {
-                Stage = $"Java {requiredMajor} 已就绪",
+                Stage = blocked.Count == 0
+                    ? $"Java {requiredMajor} 已就绪"
+                    : $"Java {requiredMajor} 已就绪（{blocked.Count} 个文件被安全软件拦截，已跳过）",
                 Fraction = 1,
             });
 
@@ -359,6 +377,10 @@ public sealed class ZuluJavaService
     private static string FormatSize(long bytes) => bytes >= 1024 * 1024
         ? $"{bytes / 1024d / 1024d:0.#} MB"
         : $"{bytes / 1024d:0.#} KB";
+
+    /// <summary>错误信息里只列前几个被拦截的文件名，避免刷屏。</summary>
+    private static string FormatBlocked(IReadOnlyList<string> blocked) =>
+        string.Join("、", blocked.Take(3).Select(Path.GetFileName));
 
     private static void TryDelete(string path)
     {

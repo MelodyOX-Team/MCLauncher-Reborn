@@ -95,4 +95,22 @@ public sealed class ArchiveUtilTests
         Assert.True(ArchiveUtil.LooksLikeZip(zip));
         Assert.False(ArchiveUtil.LooksLikeZip(notZip));
     }
+
+    [Fact]
+    public void 写入被拒绝的条目会被跳过并记录()
+    {
+        using var temp = new TempDirectory();
+        var zip = temp.File("jdk.zip");
+        CreateZip(zip, ("bin/java.exe", "exe"), ("bin/msvcp140.dll", "dll"));
+
+        var dest = temp.File("out");
+
+        // 预先在目标路径建同名目录，写文件必然失败，模拟安全软件拦截 DLL 落盘。
+        Directory.CreateDirectory(Path.Combine(dest, "bin", "msvcp140.dll"));
+
+        var blocked = ArchiveUtil.ExtractZipSkippingBlocked(zip, dest);
+
+        Assert.Equal(new[] { "bin/msvcp140.dll" }, blocked);
+        Assert.True(File.Exists(Path.Combine(dest, "bin", "java.exe")));
+    }
 }

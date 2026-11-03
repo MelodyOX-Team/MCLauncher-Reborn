@@ -238,16 +238,23 @@ public sealed partial class ModLoaderService
             }
 
             var version = full[prefix.Length..];
+
+            // maven 里同一个 Forge 构建可能带 "-<原版版本>" 后缀（只有这种制品才含 universal jar），
+            // 和 promotions 的推荐号比较时要把后缀去掉，否则 1.7.10 这种永远匹配不到推荐版本。
+            var comparable = StripGameVersionSuffix(version, gameVersion);
             result.Add(new LoaderVersionOption
             {
                 Version = version,
-                IsRecommended = version == recommended,
-                IsLatest = version == latest,
+                IsRecommended = comparable == recommended,
+                IsLatest = comparable == latest,
             });
         }
 
-        result.Reverse();
-        return result;
+        // maven-metadata 的顺序并不可靠（1.7.10 是旧构建在前，1.12.2 反而新构建在后），
+        // 自己按构建号倒序，避免对话框默认选中一个多年前的旧构建。
+        return result
+            .OrderByDescending(option => BuildSortKey(option.Version), StringComparer.Ordinal)
+            .ToList();
     }
 
     private async Task<IReadOnlyList<LoaderVersionOption>> ListNeoForgeAsync(string gameVersion, CancellationToken ct)
@@ -270,6 +277,34 @@ public sealed partial class ModLoaderService
 
         result.Reverse();
         return result;
+    }
+
+    /// <summary>去掉 Forge maven 版本号里重复的原版后缀：<c>10.13.4.1614-1.7.10</c> → <c>10.13.4.1614</c>。</summary>
+    private static string StripGameVersionSuffix(string version, string gameVersion)
+    {
+        var suffix = "-" + gameVersion;
+        return version.EndsWith(suffix, StringComparison.OrdinalIgnoreCase)
+            ? version[..^suffix.Length]
+            : version;
+    }
+
+    /// <summary>把 <c>10.13.4.1614</c> 这类构建号补齐成可直接按字符串比较的排序键。</summary>
+    private static string BuildSortKey(string version)
+    {
+        var parts = version.Split('-')[0].Split('.');
+        var builder = new System.Text.StringBuilder();
+
+        foreach (var part in parts)
+        {
+            if (!int.TryParse(part, out var number))
+            {
+                return version;
+            }
+
+            builder.Append(number.ToString("D5")).Append('.');
+        }
+
+        return builder.ToString();
     }
 
     // ------------------------------------------------------------------ 安装

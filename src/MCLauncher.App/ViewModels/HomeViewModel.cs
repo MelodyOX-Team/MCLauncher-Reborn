@@ -530,9 +530,9 @@ public sealed class HomeViewModel : ViewModelBase
 
     /// <summary>
     /// 合并全局设置与实例级覆盖项：实例里填了就用实例的值，留空则跟随全局。
-    /// 实例指定了 Java 时顺便探测一次，不可用就明确报错而不是悄悄换一个。
+    /// Java 路径只在这里汇总，是否适配当前版本交给 <see cref="EnsureJavaAsync"/> 判断。
     /// </summary>
-    private (LaunchOptions Options, JavaInfo? Java) BuildLaunchOptions(
+    private (LaunchOptions Options, string? JavaPath, bool JavaIsExplicit) BuildLaunchOptions(
         InstalledVersionInfo version,
         (string Host, int Port)? server)
     {
@@ -554,16 +554,8 @@ public sealed class HomeViewModel : ViewModelBase
             }
         }
 
-        var javaPath = string.IsNullOrWhiteSpace(instance.JavaPath) ? settings.JavaPath : instance.JavaPath;
-        JavaInfo? java = null;
-        if (!string.IsNullOrWhiteSpace(javaPath))
-        {
-            java = _stack.Java.Probe(javaPath!);
-            if (java is null)
-            {
-                throw new InvalidOperationException($"指定的 Java 不可用：{javaPath}");
-            }
-        }
+        var instanceJavaPath = string.IsNullOrWhiteSpace(instance.JavaPath) ? null : instance.JavaPath;
+        var javaPath = instanceJavaPath ?? (string.IsNullOrWhiteSpace(settings.JavaPath) ? null : settings.JavaPath);
 
         var quickPlay = ResolveQuickPlay(settings, server);
 
@@ -595,7 +587,7 @@ public sealed class HomeViewModel : ViewModelBase
             LauncherVersion = "6.0",
         };
 
-        return (options, java);
+        return (options, javaPath, instanceJavaPath is not null);
     }
 
     /// <summary>
@@ -659,17 +651,62 @@ public sealed class HomeViewModel : ViewModelBase
     }
 
     /// <summary>
-    /// 确保有能运行该版本的 Java：没有时从 Azul 下载对应的 Zulu JDK，
-    /// 下载进度复用首页启动面板。显式指定了 Java 时不介入。
+    /// 按版本要求确认 Java：先看配置的运行时是否适配（实例里显式指定的直接采用，
+    /// 全局设置只当候选，不匹配就忽略），再找本机合适的版本，都没有时从 Azul
+    /// 下载对应的 Zulu JDK，下载进度复用首页启动面板。
     /// </summary>
-    private async Task<JavaInfo?> EnsureJavaAsync(InstalledVersionInfo version, JavaInfo? manualJava)
+    private async Task<JavaInfo?> EnsureJavaAsync(
+        InstalledVersionInfo version,
+        string? configuredPath,
+        bool explicitChoice)
     {
-        if (manualJava is not null)
+        var required = _stack.Repository.Resolve(_stack.GameRoot, version.Id).RequiredJavaMajor;
+
+        if (!string.IsNullOrWhiteSpace(configuredPath))
         {
-            return manualJava;
+            var configured = _stack.Java.Probe(configuredPath!);
+
+            if (configured is null && explicitChoice)
+            {
+                throw new InvalidOperationException($"指定的 Java 不可用：{configuredPath}");
+            }
+
+            if (configured is not null && explicitChoice)
+            {
+                // 实例里手动选的 Java 一律尊重，只在版本明显不匹配时留痕，方便排查崩溃。
+                if (configured.MajorVersion != required)
+                {
+                    var warning =
+                        $"实例指定的 Java {configured.MajorVersion} 与 {version.Id} 要求的 Java {required} 不一致，仍按指定值启动。";
+                    _stack.Log.Warn(warning);
+                    AppendLaunchLine(warning);
+                }
+
+                return configured;
+            }
+
+            if (configured is null)
+            {
+                var missing = $"设置里的 Java 已不可用：{configuredPath}，改为按版本自动选择。";
+                _stack.Log.Warn(missing);
+                AppendLaunchLine(missing);
+                StatusText = missing;
+            }
+            else if (_stack.Java.SelectBest(required, new[] { configured }) is not null)
+            {
+                return configured;
+            }
+            else
+            {
+                // 全局设置里的 Java 只是默认偏好：拿 25 去跑 1.7.10 会直接崩，必须按版本要求换。
+                var message =
+                    $"已配置的 Java {configured.MajorVersion} 不适用于 {version.Id}（需要 Java {required}），改为自动选择。";
+                _stack.Log.Info(message);
+                AppendLaunchLine(message);
+                StatusText = message;
+            }
         }
 
-        var required = _stack.Repository.Resolve(_stack.GameRoot, version.Id).RequiredJavaMajor;
         var available = await Task.Run(() => _stack.Java.SelectBest(required));
         if (available is not null)
         {
@@ -784,8 +821,8 @@ public sealed class HomeViewModel : ViewModelBase
                 AppendLaunchLine($"已自动补装缺失的基础版本：{string.Join("、", repaired)}");
             }
 
-            var (options, java) = BuildLaunchOptions(version, server);
-            java = await EnsureJavaAsync(version, java);
+            var (options, javaPath, javaIsExplicit) = BuildLaunchOptions(version, server);
+            var java = await EnsureJavaAsync(version, javaPath, javaIsExplicit);
 
             var preLaunch = _stack.Config.Settings.PreLaunchCommand;
             if (!string.IsNullOrWhiteSpace(preLaunch))

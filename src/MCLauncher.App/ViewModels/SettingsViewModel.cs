@@ -517,7 +517,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
     public string JavaHint => string.IsNullOrWhiteSpace(_stack.Config.Settings.JavaPath)
         ? "留空时按版本要求自动挑选；缺少合适版本会在启动时自动下载 Zulu JDK。"
-        : "已手动指定，启动时将优先使用它。";
+        : "已手动指定：适配当前版本时优先使用，不匹配时自动改用合适版本。";
 
     /// <summary>让列表选中项跟随当前 Java 路径（手动输入或探测完成后调用）。</summary>
     private void SyncSelectedJava()

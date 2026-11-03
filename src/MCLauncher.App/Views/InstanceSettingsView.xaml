@@ -86,7 +86,7 @@
                             Content="浏览…" Width="72" Height="26" FontSize="13"/>
                 </Grid>
                 <TextBlock Margin="0,6,0,0" Style="{StaticResource BodyText}"
-                           Text="留空时跟随全局设置；指定后启动前会先检测这个 java 是否可用。"/>
+                           Text="留空时跟随全局设置并按版本要求自动挑选；指定后优先使用该 java，版本不匹配会在启动日志中提示。"/>
 
                 <TextBlock Text="游戏窗口" Style="{StaticResource SectionTitle}" Margin="0,16,0,8"/>
                 <Grid>

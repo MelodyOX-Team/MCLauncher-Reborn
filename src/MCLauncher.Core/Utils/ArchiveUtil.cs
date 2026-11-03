@@ -78,6 +78,36 @@ public static class ArchiveUtil
         }
     }
 
+    /// <summary>
+    /// 解压整个压缩包；写入被安全软件拦截（例如防护规则禁止向该目录写 DLL）的条目跳过并记录，
+    /// 由调用方探测结果是否仍然可用。返回被跳过的条目名。
+    /// </summary>
+    public static IReadOnlyList<string> ExtractZipSkippingBlocked(string archivePath, string destinationDirectory)
+    {
+        PathUtil.EnsureDirectory(destinationDirectory);
+        var blocked = new List<string>();
+
+        using var archive = ZipFile.OpenRead(archivePath);
+        foreach (var entry in archive.Entries)
+        {
+            if (ShouldSkipBasic(entry))
+            {
+                continue;
+            }
+
+            try
+            {
+                ExtractEntry(entry, destinationDirectory, overwrite: true);
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                blocked.Add(entry.FullName);
+            }
+        }
+
+        return blocked;
+    }
+
     /// <summary>把压缩包内某个条目解压到指定文件路径。</summary>
     public static bool ExtractEntryTo(string archivePath, string entryName, string destinationFile, bool overwrite = true)
     {
@@ -197,7 +227,20 @@ public static class ArchiveUtil
         }
 
         PathUtil.EnsureParentDirectory(target);
-        entry.ExtractToFile(target, overwrite);
+
+        // 安全软件可能在文件刚落盘时独占扫描，稍等重试几次再放弃。
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                entry.ExtractToFile(target, overwrite);
+                return;
+            }
+            catch (Exception ex) when (attempt < 3 && (ex is IOException or UnauthorizedAccessException))
+            {
+                System.Threading.Thread.Sleep(TimeSpan.FromMilliseconds(150 * attempt));
+            }
+        }
     }
 
     private static string Normalize(string path) => path.Replace('\\', '/').TrimStart('/');
