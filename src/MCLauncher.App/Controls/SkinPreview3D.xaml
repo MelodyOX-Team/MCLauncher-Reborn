@@ -1,0 +1,27 @@
+<UserControl x:Class="MCLauncher.App.Controls.SkinPreview3D"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="Transparent"
+             ClipToBounds="True"
+             Cursor="SizeAll"
+             MouseLeftButtonDown="HandleMouseLeftButtonDown"
+             MouseMove="HandleMouseMove"
+             MouseLeftButtonUp="HandleMouseLeftButtonUp"
+             MouseWheel="HandleMouseWheel"
+             LostMouseCapture="HandleLostMouseCapture">
+    <Viewport3D x:Name="Viewport" ClipToBounds="True">
+        <Viewport3D.Camera>
+            <PerspectiveCamera x:Name="Camera" Position="0,0,60" LookDirection="0,0,-1"
+                               UpDirection="0,1,0" FieldOfView="32"/>
+        </Viewport3D.Camera>
+        <ModelVisual3D x:Name="RootVisual">
+            <ModelVisual3D.Content>
+                <Model3DGroup x:Name="SceneGroup">
+                    <AmbientLight Color="#BEBEBE"/>
+                    <DirectionalLight Color="#9A9A9A" Direction="0.3,-0.5,-1"/>
+                    <DirectionalLight Color="#6E6E6E" Direction="-0.6,0.2,-0.8"/>
+                </Model3DGroup>
+            </ModelVisual3D.Content>
+        </ModelVisual3D>
+    </Viewport3D>
+</UserControl>

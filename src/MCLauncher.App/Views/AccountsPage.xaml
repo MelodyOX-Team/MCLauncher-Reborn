@@ -3,6 +3,7 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
              xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+             xmlns:controls="clr-namespace:MCLauncher.App.Controls"
              mc:Ignorable="d"
              d:DesignHeight="450" d:DesignWidth="720">
     <UserControl.Resources>
@@ -600,22 +601,28 @@
                                   HorizontalScrollBarVisibility="Disabled">
                     <Grid>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="190"/>
+                            <ColumnDefinition Width="210"/>
                             <ColumnDefinition Width="20"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
 
                         <!-- 皮肤 -->
                         <StackPanel Grid.Column="0">
-                            <TextBlock Text="皮肤" FontSize="13" Foreground="#5A5A5A"/>
-                            <Border Height="148" Margin="0,4,0,0" CornerRadius="6" Background="#F2F5F9"
+                            <Grid>
+                                <TextBlock Text="皮肤" FontSize="13" Foreground="#5A5A5A"/>
+                                <TextBlock Text="拖动旋转 · 滚轮缩放" FontSize="10" Foreground="#8A9099"
+                                           HorizontalAlignment="Right" VerticalAlignment="Center"/>
+                            </Grid>
+                            <Border Height="250" Margin="0,4,0,0" CornerRadius="6" Background="#F2F5F9"
                                     BorderBrush="#E2E6EC" BorderThickness="1">
                                 <Grid>
                                     <TextBlock Text="暂无预览" FontSize="12" Foreground="#8A8A8A"
                                                HorizontalAlignment="Center" VerticalAlignment="Center"
                                                Visibility="{Binding ShowSkinPlaceholder, Converter={StaticResource BoolToVis}}"/>
-                                    <Image Source="{Binding SkinPreview}" Margin="4" Stretch="Uniform"
-                                           RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                                    <controls:SkinPreview3D Margin="4"
+                                                            SkinTexture="{Binding SkinTexture}"
+                                                            CapeTexture="{Binding CapeTexture}"
+                                                            IsSlim="{Binding IsSlimSkin}"/>
                                 </Grid>
                             </Border>
 

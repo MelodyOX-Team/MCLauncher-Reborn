@@ -157,9 +157,9 @@ public sealed class AccountsViewModel : ViewModelBase
     private string _skinStatusText = string.Empty;
     private string _personalizeAccountText = string.Empty;
     private string _selectedSkinModel = SkinModelClassic;
-    private ImageSource? _skinPreview;
     private ImageSource? _capePreview;
     private string _capeName = string.Empty;
+    private BitmapSource? _capeTexture;
     private BitmapSource? _skinTexture;
     private Account? _skinAccount;
     private bool _skinModelTouched;
@@ -376,12 +376,17 @@ public sealed class AccountsViewModel : ViewModelBase
         }
     }
 
-    public ImageSource? SkinPreview => _skinPreview;
+    public BitmapSource? SkinTexture => _skinTexture;
+
+    public bool IsSlimSkin => string.Equals(SelectedSkinModel, SkinModelSlim, StringComparison.Ordinal);
 
     public ImageSource? CapePreview => _capePreview;
 
-    /// <summary>没有预览图时显示占位提示。</summary>
-    public bool ShowSkinPlaceholder => _skinPreview is null;
+    /// <summary>当前披风纹理，3D 预览直接贴在模型背后。</summary>
+    public BitmapSource? CapeTexture => _capeTexture;
+
+    /// <summary>没有皮肤纹理时显示占位提示。</summary>
+    public bool ShowSkinPlaceholder => _skinTexture is null;
 
     public bool ShowCapePlaceholder => _capePreview is null;
 
@@ -945,7 +950,7 @@ public sealed class AccountsViewModel : ViewModelBase
         _skinTexture = null;
         _skinModelTouched = false;
         _capeName = string.Empty;
-        SetSkinPreview(null);
+        UpdateSkinPreview();
         SetCapePreview(null);
         Capes.Clear();
         OnPropertyChanged(nameof(ShowCapeListPlaceholder));
@@ -1019,8 +1024,7 @@ public sealed class AccountsViewModel : ViewModelBase
         OnPropertyChanged(nameof(SelectedSkinModel));
         UpdateSkinPreview();
 
-        SetCapePreview(
-            capeTexture is null ? null : SkinPreviewRenderer.DrawCape(capeTexture, 90, 144));
+        SetCapePreview(capeTexture);
         _capeName = profile.ActiveCape is null
             ? string.Empty
             : profile.ActiveCape.Alias ?? "默认披风";
@@ -1184,26 +1188,16 @@ public sealed class AccountsViewModel : ViewModelBase
 
     private void UpdateSkinPreview()
     {
-        if (_skinTexture is null)
-        {
-            SetSkinPreview(null);
-            return;
-        }
-
-        SetSkinPreview(SkinPreviewRenderer.DrawCharacter(
-            _skinTexture, string.Equals(SelectedSkinModel, SkinModelSlim, StringComparison.Ordinal)));
-    }
-
-    private void SetSkinPreview(ImageSource? image)
-    {
-        _skinPreview = image;
-        OnPropertyChanged(nameof(SkinPreview));
+        OnPropertyChanged(nameof(SkinTexture));
+        OnPropertyChanged(nameof(IsSlimSkin));
         OnPropertyChanged(nameof(ShowSkinPlaceholder));
     }
 
-    private void SetCapePreview(ImageSource? image)
+    private void SetCapePreview(BitmapSource? texture)
     {
-        _capePreview = image;
+        _capeTexture = texture;
+        _capePreview = texture is null ? null : SkinPreviewRenderer.DrawCape(texture, 90, 144);
+        OnPropertyChanged(nameof(CapeTexture));
         OnPropertyChanged(nameof(CapePreview));
         OnPropertyChanged(nameof(ShowCapePlaceholder));
     }
