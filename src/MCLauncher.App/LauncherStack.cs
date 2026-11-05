@@ -136,6 +136,9 @@ public sealed class LauncherStack : IDisposable
     /// <summary>樱花穿透 frpc。</summary>
     public required FrpService Frp { get; init; }
 
+    /// <summary>樱花穿透 API（用访问密钥读写隧道）。</summary>
+    public required SakuraFrpApi SakuraFrp { get; init; }
+
     /// <summary>陶瓦联机官方工具。</summary>
     public required TerracottaService Terracotta { get; init; }
 
@@ -234,6 +237,7 @@ public sealed class LauncherStack : IDisposable
             GameUpdates = gameUpdates,
             DirectConnect = new DirectConnectService(log),
             Frp = new FrpService(log, config.ConfigDirectory, downloader),
+            SakuraFrp = new SakuraFrpApi(downloader, log),
             Terracotta = new TerracottaService(log, config.ConfigDirectory),
         };
     }

@@ -305,18 +305,70 @@
                               Visibility="{Binding IsFrpPage, Converter={StaticResource BoolToVis}}">
                     <StackPanel>
                         <TextBlock Style="{StaticResource HintText}" Margin="0,0,0,6"
-                                   Text="在 natfrp.com 注册并创建 TCP 隧道，把隧道本地端口设为游戏里的局域网端口；然后填写访问密钥与隧道 ID。frpc 会由启动器自动下载官方版本，也可以先点下方「下载 / 校验 frpc」准备好。"/>
+                                   Text="填写樱花穿透访问密钥（natfrp.com → 用户信息 → 访问密钥）即可读取账号里的隧道，也能直接在启动器里新建 / 删除。frpc 由启动器自动下载官方版本。"/>
 
                         <Grid>
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="Auto"/>
                                 <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
                             <TextBlock Text="访问密钥" Style="{StaticResource FieldLabel}"/>
                             <TextBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
                                      Padding="6,0" VerticalContentAlignment="Center"
                                      Text="{Binding FrpAccessKey, UpdateSourceTrigger=PropertyChanged}"/>
+                            <Button Grid.Column="2" Content="刷新隧道" Width="82" Height="26" Margin="8,0,0,0"
+                                    FontSize="12" Style="{StaticResource SkinButton}"
+                                    Command="{Binding LoadFrpTunnelsCommand}"/>
                         </Grid>
+
+                        <TextBlock Text="{Binding FrpTunnelStatus}" Style="{StaticResource HintText}"
+                                   Margin="0,4,0,0" TextWrapping="Wrap"/>
+
+                        <Grid Margin="0,10,0,4">
+                            <TextBlock Text="我的隧道" Style="{StaticResource SectionTitle}" VerticalAlignment="Center"/>
+                            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                                <Button Content="新建隧道" Width="82" Height="26" FontSize="12"
+                                        Style="{StaticResource SkinButton}"
+                                        Command="{Binding OpenTunnelEditorCommand}"/>
+                            </StackPanel>
+                        </Grid>
+
+                        <ListBox Height="132" Style="{StaticResource SmallListBox}"
+                                 ItemsSource="{Binding FrpTunnels}"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid Margin="0,2">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel Grid.Column="0" VerticalAlignment="Center">
+                                            <TextBlock Text="{Binding Title}" FontSize="12" FontWeight="SemiBold"
+                                                       Foreground="#1A1A1A" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Detail}" FontSize="10" Foreground="#8A9099"
+                                                       TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding StateText}" FontSize="10" Foreground="#8A9099"/>
+                                        </StackPanel>
+                                        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                                            <Button Content="启动" Width="48" Height="24" FontSize="11"
+                                                    Style="{StaticResource SkinButton}"
+                                                    ToolTip="选中并直接启动这条隧道"
+                                                    Command="{Binding DataContext.UseTunnelCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}"/>
+                                            <Button Content="删除" Width="48" Height="24" FontSize="11" Margin="6,0,0,0"
+                                                    Style="{StaticResource SkinButton}"
+                                                    Command="{Binding DataContext.DeleteTunnelCommand, RelativeSource={RelativeSource AncestorType=ListBox}}"
+                                                    CommandParameter="{Binding}"/>
+                                        </StackPanel>
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+
+                        <ProgressBar Height="3" Margin="0,4,0,0" IsIndeterminate="True"
+                                     Visibility="{Binding IsFrpBusy, Converter={StaticResource BoolToVis}}"/>
 
                         <Grid Margin="0,6,0,0">
                             <Grid.ColumnDefinitions>
@@ -324,10 +376,11 @@
                                 <ColumnDefinition Width="*"/>
                                 <ColumnDefinition Width="Auto"/>
                             </Grid.ColumnDefinitions>
-                            <TextBlock Text="隧道 ID" Style="{StaticResource FieldLabel}"/>
-                            <TextBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
-                                     Padding="6,0" VerticalContentAlignment="Center"
-                                     Text="{Binding FrpTunnelId, UpdateSourceTrigger=PropertyChanged}"/>
+                            <TextBlock Text="隧道" Style="{StaticResource FieldLabel}"/>
+                            <ComboBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                      ItemsSource="{Binding FrpTunnels}" DisplayMemberPath="Title"
+                                      SelectedItem="{Binding SelectedTunnel, Mode=TwoWay}"
+                                      ToolTip="从账号里的隧道中选择，选好后会直接启动穿透"/>
                             <TextBlock Grid.Column="2" Margin="10,0,0,0" VerticalAlignment="Center"
                                        FontSize="11" Foreground="#8A8A8A" Text="{Binding FrpLocalPortHint}"/>
                         </Grid>
@@ -469,6 +522,91 @@
                     </StackPanel>
                 </ScrollViewer>
             </Grid>
+        </Grid>
+
+        <!-- 新建隧道覆盖层 -->
+        <Grid Grid.RowSpan="2" Background="#66000000" Panel.ZIndex="20"
+              Visibility="{Binding IsTunnelEditorOpen, Converter={StaticResource BoolToVis}}">
+            <Border Width="430" Background="White" CornerRadius="8" Padding="18,16"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    BorderBrush="#D8D8D8" BorderThickness="1">
+                <StackPanel>
+                    <Grid>
+                        <TextBlock Text="新建 TCP 隧道" FontSize="15" FontWeight="SemiBold"/>
+                        <Button Content="×" HorizontalAlignment="Right" Width="24" Height="24"
+                                FontSize="14" Background="Transparent" BorderThickness="0"
+                                Cursor="Hand" Command="{Binding CloseTunnelEditorCommand}"/>
+                    </Grid>
+
+                    <Grid Margin="0,12,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="名称" Style="{StaticResource FieldLabel}"/>
+                        <TextBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                 Padding="6,0" VerticalContentAlignment="Center"
+                                 Text="{Binding NewTunnelName, UpdateSourceTrigger=PropertyChanged}"/>
+                    </Grid>
+
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="节点" Style="{StaticResource FieldLabel}"/>
+                        <ComboBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                  ItemsSource="{Binding FrpNodes}" DisplayMemberPath="Display"
+                                  SelectedItem="{Binding SelectedTunnelNode, Mode=TwoWay}"/>
+                    </Grid>
+
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="Auto"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="本地端口" Style="{StaticResource FieldLabel}"/>
+                        <ComboBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                  ItemsSource="{Binding FrpLocalPorts}" DisplayMemberPath="Display"
+                                  SelectedItem="{Binding SelectedLocalPort, Mode=TwoWay}"
+                                  ToolTip="本机正在监听的 TCP 端口，选中会自动填入右侧输入框"/>
+                        <TextBox Grid.Column="2" Width="62" Height="26" Margin="8,0,0,0" FontSize="12"
+                                 Padding="6,0" VerticalContentAlignment="Center"
+                                 Text="{Binding NewTunnelPort, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="也可以直接输入端口"/>
+                        <Button Grid.Column="3" Content="重新扫描" Width="72" Height="26" Margin="6,0,0,0"
+                                FontSize="12" Style="{StaticResource SkinButton}"
+                                Command="{Binding ScanLocalPortsCommand}"/>
+                    </Grid>
+
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="备注" Style="{StaticResource FieldLabel}"/>
+                        <TextBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                 Padding="6,0" VerticalContentAlignment="Center"
+                                 Text="{Binding NewTunnelNote, UpdateSourceTrigger=PropertyChanged}"/>
+                    </Grid>
+
+                    <TextBlock Style="{StaticResource HintText}" Margin="0,8,0,0" TextWrapping="Wrap"
+                               Text="只给好友联机可以随便选节点；如果服务器要公开发布（论坛、群、服务器列表），必须选带「多线」标记的节点，否则可能被封禁。"/>
+
+                    <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
+                        <Button Content="创建" Width="72" Height="28" FontSize="12"
+                                Style="{StaticResource SkinButton}"
+                                Command="{Binding CreateTunnelCommand}"/>
+                        <Button Content="取消" Width="72" Height="28" FontSize="12" Margin="8,0,0,0"
+                                Style="{StaticResource SkinButton}"
+                                Command="{Binding CloseTunnelEditorCommand}"/>
+                        <TextBlock Text="{Binding CreateTunnelStatus}" Style="{StaticResource HintText}"
+                                   Margin="10,0,0,0" VerticalAlignment="Center" TextWrapping="Wrap" MaxWidth="240"/>
+                    </StackPanel>
+                </StackPanel>
+            </Border>
         </Grid>
     </Grid>
 </UserControl>

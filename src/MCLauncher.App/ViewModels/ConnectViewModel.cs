@@ -60,6 +60,29 @@ public sealed class ConnectViewModel : ViewModelBase
     private bool _isFrpInstalling;
     private bool _frpBinaryReady;
 
+    // ---- 樱花穿透隧道管理（API v4） ----
+    private readonly AsyncRelayCommand _loadFrpTunnelsCommand;
+    private readonly AsyncRelayCommand _openTunnelEditorCommand;
+    private readonly AsyncRelayCommand _createTunnelCommand;
+    private readonly AsyncRelayCommand<FrpTunnelItem> _deleteTunnelCommand;
+    private readonly RelayCommand<FrpTunnelItem> _useTunnelCommand;
+    private readonly RelayCommand _scanLocalPortsCommand;
+    private readonly RelayCommand _closeTunnelEditorCommand;
+    private readonly Dictionary<int, string> _frpNodeNames = new();
+
+    private string _frpTunnelStatus = "填写访问密钥后点「刷新隧道」。";
+    private bool _isFrpBusy;
+    private bool _isTunnelEditorOpen;
+    private string _newTunnelName = "Minecraft";
+    private string _newTunnelPort = string.Empty;
+    private string _newTunnelNote = string.Empty;
+    private string _createTunnelStatus = string.Empty;
+    private FrpNodeOption? _selectedTunnelNode;
+    private LocalPortOption? _selectedLocalPort;
+    private FrpTunnelItem? _selectedTunnel;
+    private bool _suppressTunnelAutoStart;
+    private int _runningTunnelId;
+
     // ---- 陶瓦联机 ----
     private string _tcPlayerName = string.Empty;
     private string _tcStatusText = "尚未检测陶瓦联机工具。";
@@ -128,6 +151,28 @@ public sealed class ConnectViewModel : ViewModelBase
             InstallFrpAsync,
             () => !IsFrpRunning && !IsFrpInstalling,
             ex => FrpStatusText = ex.Message);
+        _loadFrpTunnelsCommand = new AsyncRelayCommand(
+            LoadFrpTunnelsAsync,
+            () => !IsFrpBusy && !string.IsNullOrWhiteSpace(FrpAccessKey),
+            ex => FrpTunnelStatus = ex.Message);
+        _openTunnelEditorCommand = new AsyncRelayCommand(
+            OpenTunnelEditorAsync,
+            () => !IsFrpBusy && !string.IsNullOrWhiteSpace(FrpAccessKey),
+            ex => FrpTunnelStatus = ex.Message);
+        _createTunnelCommand = new AsyncRelayCommand(
+            CreateTunnelAsync,
+            () => !IsFrpBusy
+                  && IsTunnelEditorOpen
+                  && !string.IsNullOrWhiteSpace(NewTunnelName)
+                  && !string.IsNullOrWhiteSpace(NewTunnelPort)
+                  && SelectedTunnelNode is not null,
+            ex => CreateTunnelStatus = ex.Message);
+        _deleteTunnelCommand = new AsyncRelayCommand<FrpTunnelItem>(
+            DeleteTunnelAsync,
+            _ => !IsFrpBusy);
+        _useTunnelCommand = new RelayCommand<FrpTunnelItem>(UseTunnel);
+        _scanLocalPortsCommand = new RelayCommand(ScanLocalPorts);
+        _closeTunnelEditorCommand = new RelayCommand(() => IsTunnelEditorOpen = false);
 
         _installTcCommand = new AsyncRelayCommand(
             InstallTerracottaAsync,
@@ -389,8 +434,8 @@ public sealed class ConnectViewModel : ViewModelBase
         : "frpc 尚未下载：启动穿透时会自动下载，也可以先点「下载 / 校验 frpc」准备好。";
 
     public string FrpLocalPortHint => string.IsNullOrWhiteSpace(LanPortText)
-        ? "先在 natfrp.com 创建 TCP 隧道，本地端口填游戏里「对局域网开放」显示的端口。"
-        : $"隧道本地端口应填 {LanPortText}（游戏里显示的局域网端口）。";
+        ? "选择账号里的隧道后会直接启动；隧道本地端口要设成游戏里「对局域网开放」显示的端口。"
+        : $"已检测到局域网端口 {LanPortText}：隧道本地端口应设为它。";
 
     public ObservableCollection<string> FrpLogs { get; } = new();
 
@@ -401,6 +446,175 @@ public sealed class ConnectViewModel : ViewModelBase
     public ICommand InstallFrpCommand => _installFrpCommand;
 
     public ICommand CopyFrpAddressCommand { get; }
+
+    /// <summary>账号下的隧道列表（来自 SakuraFrp API）。</summary>
+    public ObservableCollection<FrpTunnelItem> FrpTunnels { get; } = new();
+
+    /// <summary>可用于新建隧道的节点。</summary>
+    public ObservableCollection<FrpNodeOption> FrpNodes { get; } = new();
+
+    /// <summary>本机正在监听的 TCP 端口，供新建隧道时挑选。</summary>
+    public ObservableCollection<LocalPortOption> FrpLocalPorts { get; } = new();
+
+    public string FrpTunnelStatus
+    {
+        get => _frpTunnelStatus;
+        private set => SetProperty(ref _frpTunnelStatus, value);
+    }
+
+    public bool IsFrpBusy
+    {
+        get => _isFrpBusy;
+        private set
+        {
+            if (SetProperty(ref _isFrpBusy, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public bool IsTunnelEditorOpen
+    {
+        get => _isTunnelEditorOpen;
+        private set
+        {
+            if (SetProperty(ref _isTunnelEditorOpen, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public string NewTunnelName
+    {
+        get => _newTunnelName;
+        set
+        {
+            if (SetProperty(ref _newTunnelName, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    /// <summary>新建隧道的本地端口；可从下拉候选里选，也可直接输入。</summary>
+    public string NewTunnelPort
+    {
+        get => _newTunnelPort;
+        set
+        {
+            if (SetProperty(ref _newTunnelPort, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public string NewTunnelNote
+    {
+        get => _newTunnelNote;
+        set => SetProperty(ref _newTunnelNote, value);
+    }
+
+    public string CreateTunnelStatus
+    {
+        get => _createTunnelStatus;
+        private set => SetProperty(ref _createTunnelStatus, value);
+    }
+
+    public FrpNodeOption? SelectedTunnelNode
+    {
+        get => _selectedTunnelNode;
+        set
+        {
+            if (SetProperty(ref _selectedTunnelNode, value))
+            {
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public ICommand LoadFrpTunnelsCommand => _loadFrpTunnelsCommand;
+
+    public ICommand OpenTunnelEditorCommand => _openTunnelEditorCommand;
+
+    public ICommand CreateTunnelCommand => _createTunnelCommand;
+
+    public ICommand DeleteTunnelCommand => _deleteTunnelCommand;
+
+    public ICommand UseTunnelCommand => _useTunnelCommand;
+
+    /// <summary>从下拉里选一个已检测到的端口，选中后自动写进「本地端口」。</summary>
+    public LocalPortOption? SelectedLocalPort
+    {
+        get => _selectedLocalPort;
+        set
+        {
+            if (SetProperty(ref _selectedLocalPort, value) && value is not null)
+            {
+                NewTunnelPort = value.Port.ToString();
+            }
+        }
+    }
+
+    public ICommand ScanLocalPortsCommand => _scanLocalPortsCommand;
+
+    public ICommand CloseTunnelEditorCommand => _closeTunnelEditorCommand;
+
+    /// <summary>
+    /// 从账号隧道里选中的一条：选中即启动穿透。
+    /// 刷新列表时会用 <see cref="_suppressTunnelAutoStart"/> 抑制这次「选中」引发的启动。
+    /// </summary>
+    public FrpTunnelItem? SelectedTunnel
+    {
+        get => _selectedTunnel;
+        set
+        {
+            if (!SetProperty(ref _selectedTunnel, value))
+            {
+                return;
+            }
+
+            RaiseCommandStates();
+
+            if (value is null)
+            {
+                return;
+            }
+
+            FrpTunnelId = value.Id.ToString();
+
+            if (_suppressTunnelAutoStart || IsFrpInstalling)
+            {
+                return;
+            }
+
+            if (value.Status == 2)
+            {
+                FrpStatusText = string.IsNullOrWhiteSpace(value.StatusReason)
+                    ? $"隧道「{value.Name}」已被封禁，无法启动。"
+                    : $"隧道「{value.Name}」已被封禁：{value.StatusReason}";
+                return;
+            }
+
+            if (IsFrpRunning)
+            {
+                // 已经在跑别的隧道就换一条：先停再起，避免 frpc 拒绝重复启动。
+                if (_runningTunnelId == value.Id)
+                {
+                    return;
+                }
+
+                FrpStatusText = $"正在切换到隧道「{value.Name}」…";
+                _ = RestartSelectedTunnelAsync();
+                return;
+            }
+
+            FrpStatusText = $"正在启动隧道「{value.Name}」…";
+            _ = StartSelectedTunnelAsync();
+        }
+    }
 
     // ---------------------------------------------------------------- 陶瓦联机
 
@@ -575,6 +789,12 @@ public sealed class ConnectViewModel : ViewModelBase
         OnPropertyChanged(nameof(HeaderTitle));
         OnPropertyChanged(nameof(HeaderSubtitle));
 
+        // 离开樱花穿透页时把新建弹层收起来，避免覆盖在其他页面上。
+        if (method != ConnectMethod.Frp)
+        {
+            IsTunnelEditorOpen = false;
+        }
+
         if (method == ConnectMethod.Direct)
         {
             _ = RefreshNetworkAsync(force: false);
@@ -583,6 +803,14 @@ public sealed class ConnectViewModel : ViewModelBase
         else if (method == ConnectMethod.Frp)
         {
             _ = DetectPortAsync(silent: true);
+
+            // 已保存访问密钥就直接把隧道列表拉回来，用户打开页面即可选择。
+            if (FrpTunnels.Count == 0
+                && !IsFrpBusy
+                && !string.IsNullOrWhiteSpace(FrpAccessKey))
+            {
+                _ = LoadFrpTunnelsAsync();
+            }
         }
         else if (method == ConnectMethod.Terracotta)
         {
@@ -832,12 +1060,14 @@ public sealed class ConnectViewModel : ViewModelBase
         FrpStatusText = "正在准备 frpc…";
 
         await _stack.Frp.StartAsync(FrpAccessKey, FrpTunnelId).ConfigureAwait(true);
+        _runningTunnelId = int.TryParse(FrpTunnelId.Trim(), out var id) ? id : 0;
         ApplyFrpState(_stack.Frp.State);
     }
 
     private async Task StopFrpAsync()
     {
         FrpStatusText = "正在停止 frpc…";
+        _runningTunnelId = 0;
         var state = await _stack.Frp.StopAsync().ConfigureAwait(true);
         ApplyFrpState(state);
     }
@@ -869,6 +1099,298 @@ public sealed class ConnectViewModel : ViewModelBase
         finally
         {
             IsFrpInstalling = false;
+        }
+    }
+
+    private async Task LoadFrpTunnelsAsync()
+    {
+        var token = FrpAccessKey.Trim();
+        if (token.Length == 0)
+        {
+            FrpTunnelStatus = "请先填写访问密钥。";
+            return;
+        }
+
+        IsFrpBusy = true;
+        FrpTunnelStatus = "正在读取隧道列表…";
+
+        try
+        {
+            ApplyNodes(await _stack.SakuraFrp.GetNodesAsync(token).ConfigureAwait(true));
+
+            var tunnels = await _stack.SakuraFrp.GetTunnelsAsync(token).ConfigureAwait(true);
+
+            ApplyTunnels(tunnels);
+
+            // 密钥确实能通才落盘，避免把写错的密钥存进设置。
+            _stack.Config.Settings.FrpAccessKey = token;
+            _stack.Config.Save();
+
+            FrpTunnelStatus = tunnels.Count == 0
+                ? "已连接，账号下还没有隧道。点「新建隧道」创建一条。"
+                : $"已连接，共 {tunnels.Count} 条隧道。";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            FrpTunnelStatus = ex.Message;
+        }
+        finally
+        {
+            IsFrpBusy = false;
+        }
+    }
+
+    private void ApplyNodes(IReadOnlyList<SakuraFrpNode> nodes)
+    {
+        var selectedId = SelectedTunnelNode?.Id;
+
+        _frpNodeNames.Clear();
+        FrpNodes.Clear();
+
+        foreach (var node in nodes.Where(n => n.CanCreate).OrderBy(n => n.Name, StringComparer.Ordinal))
+        {
+            _frpNodeNames[node.Id] = node.Name;
+            FrpNodes.Add(new FrpNodeOption(node));
+        }
+
+        // 优先保留用户已选的节点；没有就挑一个允许公开游戏的，再退到第一个。
+        SelectedTunnelNode = FrpNodes.FirstOrDefault(n => n.Id == selectedId)
+                             ?? FrpNodes.FirstOrDefault(n => n.PublicGameAllowed)
+                             ?? FrpNodes.FirstOrDefault();
+    }
+
+    private async Task OpenTunnelEditorAsync()
+    {
+        var token = FrpAccessKey.Trim();
+        if (token.Length == 0)
+        {
+            FrpTunnelStatus = "请先填写访问密钥。";
+            return;
+        }
+
+        IsTunnelEditorOpen = true;
+        CreateTunnelStatus = string.Empty;
+        ScanLocalPorts();
+
+        if (FrpNodes.Count > 0)
+        {
+            return;
+        }
+
+        IsFrpBusy = true;
+        try
+        {
+            ApplyNodes(await _stack.SakuraFrp.GetNodesAsync(token).ConfigureAwait(true));
+            if (FrpNodes.Count == 0)
+            {
+                CreateTunnelStatus = "这个账号当前没有可用节点，请稍后再试。";
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            CreateTunnelStatus = ex.Message;
+        }
+        finally
+        {
+            IsFrpBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// 扫描本机正在监听的 TCP 端口填进候选列表；优先选游戏日志里的局域网端口，
+    /// 其次 25565，最后退到第一个检测到的端口。
+    /// </summary>
+    private void ScanLocalPorts()
+    {
+        FrpLocalPorts.Clear();
+        foreach (var port in LocalPortScanner.GetListeningTcpPorts())
+        {
+            FrpLocalPorts.Add(new LocalPortOption(port));
+        }
+
+        var lanPort = int.TryParse(LanPortText.Trim(), out var lan) ? lan : 0;
+        var typedPort = int.TryParse(NewTunnelPort.Trim(), out var typed) ? typed : 0;
+
+        SelectedLocalPort = (lanPort > 0 ? FrpLocalPorts.FirstOrDefault(p => p.Port == lanPort) : null)
+                            ?? (typedPort > 0 ? FrpLocalPorts.FirstOrDefault(p => p.Port == typedPort) : null)
+                            ?? FrpLocalPorts.FirstOrDefault(p => p.Port == 25565)
+                            ?? FrpLocalPorts.FirstOrDefault();
+    }
+
+    private async Task CreateTunnelAsync()
+    {
+        var token = FrpAccessKey.Trim();
+        if (token.Length == 0)
+        {
+            CreateTunnelStatus = "请先填写访问密钥。";
+            return;
+        }
+
+        var node = SelectedTunnelNode;
+        if (node is null)
+        {
+            CreateTunnelStatus = "请先选择节点。";
+            return;
+        }
+
+        if (!int.TryParse(NewTunnelPort.Trim(), out var port) || port is < 1 or > 65535)
+        {
+            CreateTunnelStatus = "本地端口必须是 1-65535 之间的数字。";
+            return;
+        }
+
+        IsFrpBusy = true;
+        CreateTunnelStatus = "正在创建隧道…";
+
+        try
+        {
+            var created = await _stack.SakuraFrp
+                .CreateTcpTunnelAsync(
+                    token,
+                    new SakuraFrpTunnelRequest
+                    {
+                        Name = NewTunnelName.Trim(),
+                        NodeId = node.Id,
+                        LocalPort = port,
+                        Note = NewTunnelNote.Trim(),
+                    })
+                .ConfigureAwait(true);
+
+            FrpTunnelId = created.Id.ToString();
+            IsTunnelEditorOpen = false;
+            NewTunnelNote = string.Empty;
+
+            await LoadFrpTunnelsAsync().ConfigureAwait(true);
+            FrpTunnelStatus = $"已创建隧道「{created.Name}」（#{created.Id}），远程地址 {created.Remote ?? "由服务端分配"}。";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            CreateTunnelStatus = ex.Message;
+        }
+        finally
+        {
+            IsFrpBusy = false;
+        }
+    }
+
+    private async Task DeleteTunnelAsync(FrpTunnelItem? item)
+    {
+        if (item is null)
+        {
+            return;
+        }
+
+        if (MessageBox.Show(
+                $"删除隧道「{item.Name}」（#{item.Id}）？删除后无法恢复。",
+                "删除隧道",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning) != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        IsFrpBusy = true;
+
+        try
+        {
+            await _stack.SakuraFrp
+                .DeleteTunnelsAsync(FrpAccessKey.Trim(), new[] { item.Id })
+                .ConfigureAwait(true);
+
+            if (IsCurrentTunnelId(item.Id))
+            {
+                FrpTunnelId = string.Empty;
+                _stack.Config.Settings.FrpTunnelId = null;
+                _stack.Config.Save();
+            }
+
+            await LoadFrpTunnelsAsync().ConfigureAwait(true);
+            FrpTunnelStatus = $"已删除隧道「{item.Name}」。";
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            FrpTunnelStatus = ex.Message;
+        }
+        finally
+        {
+            IsFrpBusy = false;
+        }
+    }
+
+    private bool IsCurrentTunnelId(int id) =>
+        int.TryParse(FrpTunnelId.Trim(), out var current) && current == id;
+
+    private void UseTunnel(FrpTunnelItem? item)
+    {
+        if (item is null)
+        {
+            return;
+        }
+
+        // 选中的还是同一条（比如停了之后又点「启动」）：直接再拉起来。
+        if (ReferenceEquals(SelectedTunnel, item))
+        {
+            FrpTunnelId = item.Id.ToString();
+            FrpStatusText = $"正在启动隧道「{item.Name}」…";
+            _ = StartSelectedTunnelAsync();
+            return;
+        }
+
+        SelectedTunnel = item;
+    }
+
+    /// <summary>
+    /// 重建隧道列表并尽量保留原来的选中项。刷新期间抑制自动启动，
+    /// 否则每次刷新都会把正在用的隧道重新拉起一遍。
+    /// </summary>
+    private void ApplyTunnels(IReadOnlyList<SakuraFrpTunnel> tunnels)
+    {
+        var selectedId = SelectedTunnel?.Id;
+
+        _suppressTunnelAutoStart = true;
+        try
+        {
+            FrpTunnels.Clear();
+            foreach (var tunnel in tunnels.OrderBy(t => t.Id))
+            {
+                FrpTunnels.Add(FrpTunnelItem.From(tunnel, _frpNodeNames));
+            }
+
+            SelectedTunnel = (selectedId is { } id ? FrpTunnels.FirstOrDefault(t => t.Id == id) : null)
+                             ?? (int.TryParse(FrpTunnelId.Trim(), out var current)
+                                 ? FrpTunnels.FirstOrDefault(t => t.Id == current)
+                                 : null);
+        }
+        finally
+        {
+            _suppressTunnelAutoStart = false;
+        }
+    }
+
+    /// <summary>启动当前选中的隧道；被用户从列表里点选时自动触发。</summary>
+    private async Task StartSelectedTunnelAsync()
+    {
+        try
+        {
+            await StartFrpAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            FrpStatusText = ex.Message;
+        }
+    }
+
+    /// <summary>换一条隧道：先停掉当前 frpc 再按新隧道启动。</summary>
+    private async Task RestartSelectedTunnelAsync()
+    {
+        try
+        {
+            await StopFrpAsync().ConfigureAwait(true);
+            await StartFrpAsync().ConfigureAwait(true);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            FrpStatusText = ex.Message;
         }
     }
 
@@ -1143,5 +1665,102 @@ public sealed class ConnectViewModel : ViewModelBase
         _joinTcCommand.RaiseCanExecuteChanged();
         _stopTcCommand.RaiseCanExecuteChanged();
         _joinAddressCommand.RaiseCanExecuteChanged();
+        _loadFrpTunnelsCommand.RaiseCanExecuteChanged();
+        _openTunnelEditorCommand.RaiseCanExecuteChanged();
+        _createTunnelCommand.RaiseCanExecuteChanged();
+        _deleteTunnelCommand.RaiseCanExecuteChanged();
     }
+}
+
+/// <summary>隧道列表里的一行。</summary>
+public sealed class FrpTunnelItem
+{
+    public required int Id { get; init; }
+
+    public required string Name { get; init; }
+
+    public required string Type { get; init; }
+
+    public required string NodeName { get; init; }
+
+    public required string LocalAddress { get; init; }
+
+    public required string Remote { get; init; }
+
+    public bool Online { get; init; }
+
+    /// <summary>0 正常、2 封禁。</summary>
+    public int Status { get; init; }
+
+    public string? StatusReason { get; init; }
+
+    public string Title => $"{Name}  #{Id}";
+
+    public string Detail =>
+        $"{Type.ToUpperInvariant()} · 节点 {NodeName} · 本地 {LocalAddress}"
+        + (string.IsNullOrWhiteSpace(Remote) ? string.Empty : $" → {Remote}");
+
+    public string StateText => Status == 2
+        ? string.IsNullOrWhiteSpace(StatusReason) ? "已封禁" : $"已封禁：{StatusReason}"
+        : Online ? "在线" : "离线";
+
+    public static FrpTunnelItem From(SakuraFrpTunnel tunnel, IReadOnlyDictionary<int, string> nodeNames) => new()
+    {
+        Id = tunnel.Id,
+        Name = tunnel.Name,
+        Type = tunnel.Type,
+        NodeName = nodeNames.TryGetValue(tunnel.Node, out var name) ? name : $"#{tunnel.Node}",
+        LocalAddress = $"{tunnel.LocalIp}:{tunnel.LocalPort}",
+        Remote = tunnel.Remote,
+        Online = tunnel.Online,
+        Status = tunnel.Status,
+        StatusReason = tunnel.StatusReason,
+    };
+}
+
+/// <summary>新建隧道时可选的节点。</summary>
+public sealed class FrpNodeOption
+{
+    public FrpNodeOption(SakuraFrpNode node)
+    {
+        Id = node.Id;
+        Name = node.Name;
+        Host = node.Host;
+        PublicGameAllowed = node.PublicGameAllowed;
+    }
+
+    public int Id { get; }
+
+    public string Name { get; }
+
+    public string Host { get; }
+
+    /// <summary>是否可用于公开游戏服务器（节点名带「多线」或 flag 第 12 位）。</summary>
+    public bool PublicGameAllowed { get; }
+
+    public string Display => PublicGameAllowed
+        ? $"{Name} · {Host}（多线，可公开游戏）"
+        : $"{Name} · {Host}";
+
+    public override string ToString() => Display;
+}
+
+/// <summary>本机监听端口下拉里的一项。</summary>
+public sealed class LocalPortOption
+{
+    public LocalPortOption(LocalListeningPort port)
+    {
+        Port = port.Port;
+        ProcessName = port.ProcessName;
+    }
+
+    public int Port { get; }
+
+    public string ProcessName { get; }
+
+    public string Display => string.IsNullOrWhiteSpace(ProcessName)
+        ? Port.ToString()
+        : $"{Port} · {ProcessName}";
+
+    public override string ToString() => Display;
 }
