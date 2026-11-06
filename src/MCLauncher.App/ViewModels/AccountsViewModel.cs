@@ -1482,7 +1482,18 @@ public sealed class AccountsViewModel : ViewModelBase
             return;
         }
 
-        OpenUrl(uri);
+        // 微软登录页优先用无痕窗口打开：避免浏览器里已登录的微软账号干扰设备码授权，
+        // 也能防止验证页留在浏览记录里。浏览器不支持无痕时自动退回普通打开。
+        try
+        {
+            BrowserUtil.OpenIncognito(
+                uri,
+                ex => _stack.Log.Warn("无痕窗口打开失败，已改用默认浏览器打开", ex));
+        }
+        catch (Exception ex)
+        {
+            _stack.Log.Warn($"打开链接失败：{uri}", ex);
+        }
     }
 
     private void OpenUrl(string? uri)
