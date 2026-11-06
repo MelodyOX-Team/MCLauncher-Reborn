@@ -73,9 +73,11 @@ public sealed class ConnectViewModel : ViewModelBase
     private bool _isTunnelEditorOpen;
     private string _newTunnelName = "Minecraft";
     private string _newTunnelPort = string.Empty;
+    private string _newTunnelRemote = string.Empty;
     private string _newTunnelNote = string.Empty;
     private string _createTunnelStatus = string.Empty;
     private FrpNodeOption? _selectedTunnelNode;
+    private TunnelTypeOption? _selectedTunnelType;
     private LocalPortOption? _selectedLocalPort;
     private FrpTunnelItem? _selectedTunnel;
 
@@ -159,8 +161,9 @@ public sealed class ConnectViewModel : ViewModelBase
             () => !IsFrpBusy
                   && IsTunnelEditorOpen
                   && !string.IsNullOrWhiteSpace(NewTunnelName)
-                  && !string.IsNullOrWhiteSpace(NewTunnelPort)
-                  && SelectedTunnelNode is not null,
+                  && SelectedTunnelNode is not null
+                  && SelectedTunnelType is not null
+                  && (!SelectedTunnelType.NeedsPort || !string.IsNullOrWhiteSpace(NewTunnelPort)),
             ex => CreateTunnelStatus = ex.Message);
         _deleteTunnelCommand = new AsyncRelayCommand<FrpTunnelItem>(
             DeleteTunnelAsync,
@@ -435,6 +438,9 @@ public sealed class ConnectViewModel : ViewModelBase
     /// <summary>可用于新建隧道的节点。</summary>
     public ObservableCollection<FrpNodeOption> FrpNodes { get; } = new();
 
+    /// <summary>当前节点支持的隧道类型（禁 UDP 的节点没有 UDP / WOL，不能建站的节点没有 HTTP / HTTPS）。</summary>
+    public ObservableCollection<TunnelTypeOption> AvailableTunnelTypes { get; } = new();
+
     /// <summary>本机正在监听的 TCP 端口，供新建隧道时挑选。</summary>
     public ObservableCollection<LocalPortOption> FrpLocalPorts { get; } = new();
 
@@ -499,6 +505,62 @@ public sealed class ConnectViewModel : ViewModelBase
         set => SetProperty(ref _newTunnelNote, value);
     }
 
+    /// <summary>HTTP / HTTPS 隧道绑定的域名，留空由服务端分配。</summary>
+    public string NewTunnelRemote
+    {
+        get => _newTunnelRemote;
+        set => SetProperty(ref _newTunnelRemote, value);
+    }
+
+    /// <summary>新建隧道选择的类型（TCP / UDP / HTTP / HTTPS / WOL）。</summary>
+    public TunnelTypeOption? SelectedTunnelType
+    {
+        get => _selectedTunnelType;
+        set
+        {
+            if (!SetProperty(ref _selectedTunnelType, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsTunnelPortVisible));
+            OnPropertyChanged(nameof(IsTunnelDomainVisible));
+            RaiseCommandStates();
+        }
+    }
+
+    /// <summary>WOL 隧道不用填本地端口。</summary>
+    public bool IsTunnelPortVisible => SelectedTunnelType?.NeedsPort ?? true;
+
+    /// <summary>只有 HTTP / HTTPS 隧道需要绑定域名。</summary>
+    public bool IsTunnelDomainVisible => SelectedTunnelType?.NeedsDomain ?? false;
+
+    /// <summary>当前节点能力受限时的提示；没有任何限制时为空串。</summary>
+    public string TunnelNodeCapabilityHint
+    {
+        get
+        {
+            var node = SelectedTunnelNode;
+            if (node is null)
+            {
+                return string.Empty;
+            }
+
+            var hints = new List<string>();
+            if (!node.SupportsUdp)
+            {
+                hints.Add("该节点禁 UDP，无法创建 UDP / WOL 隧道");
+            }
+
+            if (!node.WebsiteAllowed)
+            {
+                hints.Add("该节点不支持建站，无法创建 HTTP / HTTPS 隧道");
+            }
+
+            return hints.Count == 0 ? string.Empty : string.Join("；", hints) + "。";
+        }
+    }
+
     public string CreateTunnelStatus
     {
         get => _createTunnelStatus;
@@ -510,10 +572,14 @@ public sealed class ConnectViewModel : ViewModelBase
         get => _selectedTunnelNode;
         set
         {
-            if (SetProperty(ref _selectedTunnelNode, value))
+            if (!SetProperty(ref _selectedTunnelNode, value))
             {
-                RaiseCommandStates();
+                return;
             }
+
+            OnPropertyChanged(nameof(TunnelNodeCapabilityHint));
+            SyncTunnelTypes();
+            RaiseCommandStates();
         }
     }
 
@@ -1106,6 +1172,30 @@ public sealed class ConnectViewModel : ViewModelBase
                              ?? FrpNodes.FirstOrDefault();
     }
 
+    /// <summary>
+    /// 按当前节点的能力刷新可选类型；原来选中的类型仍在列表里就保留，否则回退到第一项。
+    /// </summary>
+    private void SyncTunnelTypes()
+    {
+        var node = SelectedTunnelNode;
+        var previous = SelectedTunnelType?.Type;
+
+        AvailableTunnelTypes.Clear();
+        if (node is null)
+        {
+            SelectedTunnelType = null;
+            return;
+        }
+
+        foreach (var option in TunnelTypeOption.All.Where(option => node.Supports(option.Type)))
+        {
+            AvailableTunnelTypes.Add(option);
+        }
+
+        SelectedTunnelType = AvailableTunnelTypes.FirstOrDefault(option => option.Type == previous)
+                             ?? AvailableTunnelTypes.FirstOrDefault();
+    }
+
     private async Task OpenTunnelEditorAsync()
     {
         var token = FrpAccessKey.Trim();
@@ -1180,7 +1270,22 @@ public sealed class ConnectViewModel : ViewModelBase
             return;
         }
 
-        if (!int.TryParse(NewTunnelPort.Trim(), out var port) || port is < 1 or > 65535)
+        var kind = SelectedTunnelType;
+        if (kind is null)
+        {
+            CreateTunnelStatus = "请先选择隧道类型。";
+            return;
+        }
+
+        if (!node.Supports(kind.Type))
+        {
+            CreateTunnelStatus = $"节点「{node.Name}」不支持创建 {kind.Display}。";
+            return;
+        }
+
+        var port = 0;
+        if (kind.NeedsPort
+            && (!int.TryParse(NewTunnelPort.Trim(), out port) || port is < 1 or > 65535))
         {
             CreateTunnelStatus = "本地端口必须是 1-65535 之间的数字。";
             return;
@@ -1192,24 +1297,27 @@ public sealed class ConnectViewModel : ViewModelBase
         try
         {
             var created = await _stack.SakuraFrp
-                .CreateTcpTunnelAsync(
+                .CreateTunnelAsync(
                     token,
                     new SakuraFrpTunnelRequest
                     {
                         Name = NewTunnelName.Trim(),
                         NodeId = node.Id,
+                        Type = kind.Type,
                         LocalPort = port,
+                        Remote = NewTunnelRemote.Trim(),
                         Note = NewTunnelNote.Trim(),
                     })
                 .ConfigureAwait(true);
 
             IsTunnelEditorOpen = false;
             NewTunnelNote = string.Empty;
+            NewTunnelRemote = string.Empty;
 
             await LoadFrpTunnelsAsync().ConfigureAwait(true);
             // 新建的隧道自动勾选，方便直接点启动穿透。
             if (FrpTunnels.FirstOrDefault(t => t.Id == created.Id) is { } newItem) newItem.IsSelected = true;
-            FrpTunnelStatus = $"已创建隧道「{created.Name}」（#{created.Id}），远程地址 {created.Remote ?? "由服务端分配"}。";
+            FrpTunnelStatus = $"已创建 {kind.Display}「{created.Name}」（#{created.Id}），远程地址 {created.Remote ?? "由服务端分配"}。";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1642,6 +1750,9 @@ public sealed class FrpNodeOption
         Name = node.Name;
         Host = node.Host;
         PublicGameAllowed = node.PublicGameAllowed;
+        WebsiteAllowed = node.WebsiteAllowed;
+        SupportsUdp = node.SupportsUdp;
+        IsBeta = node.IsBeta;
     }
 
     public int Id { get; }
@@ -1653,9 +1764,82 @@ public sealed class FrpNodeOption
     /// <summary>是否可用于公开游戏服务器（节点名带「多线」或 flag 第 12 位）。</summary>
     public bool PublicGameAllowed { get; }
 
-    public string Display => PublicGameAllowed
-        ? $"{Name} · {Host}（多线，可公开游戏）"
-        : $"{Name} · {Host}";
+    /// <summary>是否支持建站（HTTP / HTTPS）。</summary>
+    public bool WebsiteAllowed { get; }
+
+    /// <summary>是否支持 UDP；false 即面板标记的「禁 UDP」。</summary>
+    public bool SupportsUdp { get; }
+
+    /// <summary>BETA 测试节点。</summary>
+    public bool IsBeta { get; }
+
+    public bool Supports(string type) => type switch
+    {
+        SakuraFrpTunnelTypes.Tcp => true,
+        SakuraFrpTunnelTypes.Udp => SupportsUdp,
+        // WOL 靠 UDP 发唤醒包，禁 UDP 的节点同样建不了。
+        SakuraFrpTunnelTypes.Wol => SupportsUdp,
+        SakuraFrpTunnelTypes.Http or SakuraFrpTunnelTypes.Https => WebsiteAllowed,
+        _ => false,
+    };
+
+    /// <summary>节点标签，例如「可建站 / 公开游戏 / 禁 UDP / BETA」。</summary>
+    public string Tags
+    {
+        get
+        {
+            var tags = new List<string>();
+            if (WebsiteAllowed) tags.Add("可建站");
+            if (PublicGameAllowed) tags.Add("公开游戏");
+            if (!SupportsUdp) tags.Add("禁UDP");
+            if (IsBeta) tags.Add("BETA");
+            return string.Join(" / ", tags);
+        }
+    }
+
+    public string Display
+    {
+        get
+        {
+            var name = string.IsNullOrWhiteSpace(Host) ? Name : $"{Name} · {Host}";
+            return string.IsNullOrWhiteSpace(Tags) ? name : $"{name}（{Tags}）";
+        }
+    }
+
+    public override string ToString() => Display;
+}
+
+/// <summary>新建隧道时可以选择的隧道类型。</summary>
+public sealed class TunnelTypeOption
+{
+    public TunnelTypeOption(string type, string display, bool needsPort, bool needsDomain)
+    {
+        Type = type;
+        Display = display;
+        NeedsPort = needsPort;
+        NeedsDomain = needsDomain;
+    }
+
+    /// <summary>全部可选类型（实际可选项按节点能力过滤）。</summary>
+    public static readonly IReadOnlyList<TunnelTypeOption> All = new[]
+    {
+        new TunnelTypeOption(SakuraFrpTunnelTypes.Tcp, "TCP 隧道", needsPort: true, needsDomain: false),
+        new TunnelTypeOption(SakuraFrpTunnelTypes.Udp, "UDP 隧道", needsPort: true, needsDomain: false),
+        new TunnelTypeOption(SakuraFrpTunnelTypes.Http, "HTTP 建站隧道", needsPort: true, needsDomain: true),
+        new TunnelTypeOption(SakuraFrpTunnelTypes.Https, "HTTPS 建站隧道", needsPort: true, needsDomain: true),
+        new TunnelTypeOption(SakuraFrpTunnelTypes.Wol, "WOL 开机隧道", needsPort: false, needsDomain: false),
+    };
+
+    /// <summary>API 的 <c>type</c> 取值。</summary>
+    public string Type { get; }
+
+    public string Display { get; }
+
+    /// <summary>需要填写本地端口。</summary>
+    public bool NeedsPort { get; }
+
+    /// <summary>需要填写绑定域名。</summary>
+    public bool NeedsDomain { get; }
 
     public override string ToString() => Display;
 }

@@ -523,7 +523,7 @@
                     BorderBrush="#D8D8D8" BorderThickness="1">
                 <StackPanel>
                     <Grid>
-                        <TextBlock Text="新建 TCP 隧道" FontSize="15" FontWeight="SemiBold"/>
+                        <TextBlock Text="新建隧道" FontSize="15" FontWeight="SemiBold"/>
                         <Button Content="×" HorizontalAlignment="Right" Width="24" Height="24"
                                 FontSize="14" Background="Transparent" BorderThickness="0"
                                 Cursor="Hand" Command="{Binding CloseTunnelEditorCommand}"/>
@@ -545,13 +545,26 @@
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
                         </Grid.ColumnDefinitions>
+                        <TextBlock Text="类型" Style="{StaticResource FieldLabel}"/>
+                        <ComboBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                  ItemsSource="{Binding AvailableTunnelTypes}" DisplayMemberPath="Display"
+                                  SelectedItem="{Binding SelectedTunnelType, Mode=TwoWay}"
+                                  ToolTip="可选项按所选节点的能力过滤"/>
+                    </Grid>
+
+                    <Grid Margin="0,8,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
                         <TextBlock Text="节点" Style="{StaticResource FieldLabel}"/>
                         <ComboBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
                                   ItemsSource="{Binding FrpNodes}" DisplayMemberPath="Display"
                                   SelectedItem="{Binding SelectedTunnelNode, Mode=TwoWay}"/>
                     </Grid>
 
-                    <Grid Margin="0,8,0,0">
+                    <Grid Margin="0,8,0,0"
+                          Visibility="{Binding IsTunnelPortVisible, Converter={StaticResource BoolToVis}}">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
                             <ColumnDefinition Width="*"/>
@@ -572,6 +585,19 @@
                                 Command="{Binding ScanLocalPortsCommand}"/>
                     </Grid>
 
+                    <Grid Margin="0,8,0,0"
+                          Visibility="{Binding IsTunnelDomainVisible, Converter={StaticResource BoolToVis}}">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Text="绑定域名" Style="{StaticResource FieldLabel}"/>
+                        <TextBox Grid.Column="1" Height="26" Margin="8,0,0,0" FontSize="12"
+                                 Padding="6,0" VerticalContentAlignment="Center"
+                                 Text="{Binding NewTunnelRemote, UpdateSourceTrigger=PropertyChanged}"
+                                 ToolTip="可留空由服务端分配；内地节点使用自有域名时需要有 ICP 备案"/>
+                    </Grid>
+
                     <Grid Margin="0,8,0,0">
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/>
@@ -584,7 +610,10 @@
                     </Grid>
 
                     <TextBlock Style="{StaticResource HintText}" Margin="0,8,0,0" TextWrapping="Wrap"
-                               Text="只给好友联机可以随便选节点；如果服务器要公开发布（论坛、群、服务器列表），必须选带「多线」标记的节点，否则可能被封禁。"/>
+                               Text="{Binding TunnelNodeCapabilityHint}"/>
+
+                    <TextBlock Style="{StaticResource HintText}" Margin="0,6,0,0" TextWrapping="Wrap"
+                               Text="只给好友联机可以随便选节点；如果服务器要公开发布（论坛、群、服务器列表），必须选带「多线」标记的节点，否则可能被封禁。UDP 隧道用于语音模组等额外端口，HTTP/HTTPS 隧道用于建站。"/>
 
                     <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                         <Button Content="创建" Width="72" Height="28" FontSize="12"
