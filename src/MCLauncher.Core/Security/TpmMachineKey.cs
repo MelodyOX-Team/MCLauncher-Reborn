@@ -12,9 +12,7 @@ internal sealed class TpmMachineKey : IDisposable
     private const string ProviderName = "Microsoft Platform Crypto Provider";
     private const string RsaAlgorithm = "RSA";
     private const string LengthProperty = "Length";
-    private const string KeyUsageProperty = "KeyUsage";
     private const string PublicBlobType = "RSAPUBLICBLOB";
-    private const uint AllowDecryptFlag = 0x00000001;
     private const uint OaepFlag = 0x00000004; // NCRYPT_PAD_OAEP_FLAG
     private const uint RsaPublicMagic = 0x31415352;
 
@@ -52,10 +50,12 @@ internal sealed class TpmMachineKey : IDisposable
                     return null;
                 }
 
-                // 属性设置失败时会留下签名用途的密钥，必须清理掉，否则后续解密必然失败。
-                if (!SetDwordProperty(key, LengthProperty, 2048) ||
-                    !SetDwordProperty(key, KeyUsageProperty, (int)AllowDecryptFlag) ||
-                    NCryptFinalizeKey(key, 0) != 0)
+                // 长度尽力设置为 2048；不要设置 KeyUsage：部分固件（如 Intel PTT）不支持
+                // 创建时设置该属性（0x80090029 NTE_NOT_SUPPORTED），而默认创建的 RSA 密钥本来就允许解密。
+                // 密钥是否真的可用由 MachineKey.Wrap 的「加密后回解验证」兜底，此处宽松即可。
+                SetDwordProperty(key, LengthProperty, 2048);
+
+                if (NCryptFinalizeKey(key, 0) != 0)
                 {
                     NCryptDeleteKey(key, 0);
                     NCryptFreeObject(key);
