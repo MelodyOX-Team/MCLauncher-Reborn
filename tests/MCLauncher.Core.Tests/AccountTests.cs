@@ -133,4 +133,115 @@ public sealed class AccountTests
         Assert.Contains("异常退出", MCLauncher.Core.Services.GameLauncher.DescribeExitCode(1));
         Assert.Contains("异常退出", MCLauncher.Core.Services.GameLauncher.DescribeExitCode(255));
     }
+
+    [Fact]
+    public void 账号写入独立的加密文件且settings不再包含账号列表()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var service = new AccountService(config, log);
+            service.AddOffline("加密测试甲");
+
+            var accountsPath = Path.Combine(config.ConfigDirectory, AccountStore.FileName);
+            Assert.True(File.Exists(accountsPath));
+
+            // 文件说明保留在明文里，账号与令牌在加密载荷中。
+            var vault = File.ReadAllText(accountsPath);
+            Assert.Contains("readme", vault);
+            Assert.DoesNotContain("加密测试甲", vault);
+
+            // settings.json 只保留当前账号 ID。
+            var settings = File.ReadAllText(Path.Combine(config.ConfigDirectory, "settings.json"));
+            Assert.DoesNotContain("\"accounts\"", settings);
+            Assert.NotNull(config.Settings.SelectedAccountUuid);
+
+            // 重新构造服务（相当于重启启动器）能解回同一个账号。
+            var reloaded = new AccountService(config, log);
+            Assert.Equal("加密测试甲", Assert.Single(reloaded.Accounts).Name);
+            Assert.Equal(reloaded.Accounts[0].Uuid, reloaded.Selected?.Uuid);
+        });
+    }
+
+    [Fact]
+    public void 删除账号文件后当前账号置空()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var service = new AccountService(config, log);
+            service.AddOffline("待删除");
+            Assert.NotNull(config.Settings.SelectedAccountUuid);
+
+            File.Delete(Path.Combine(config.ConfigDirectory, AccountStore.FileName));
+
+            var reloaded = new AccountService(config, log);
+            Assert.Empty(reloaded.Accounts);
+            Assert.Null(reloaded.Selected);
+            Assert.Null(config.Settings.SelectedAccountUuid);
+        });
+    }
+
+    [Fact]
+    public void 指向不存在的账号时置空()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var service = new AccountService(config, log);
+            service.AddOffline("甲");
+
+            config.Settings.SelectedAccountUuid = "00000000000000000000000000000000";
+            config.Save();
+
+            var reloaded = new AccountService(config, log);
+            Assert.Single(reloaded.Accounts);
+            Assert.Null(config.Settings.SelectedAccountUuid);
+        });
+    }
+
+    [Fact]
+    public void 旧版settings里的账号迁移到accounts()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var legacy = Account.CreateOffline("旧账号");
+            config.Settings.LegacyAccounts = new List<Account> { legacy };
+            config.Settings.SelectedAccountUuid = legacy.Uuid;
+            config.Save();
+
+            var reloaded = new AccountService(config, log);
+
+            Assert.Equal("旧账号", Assert.Single(reloaded.Accounts).Name);
+            Assert.Equal(legacy.Uuid, reloaded.Selected?.Uuid);
+            Assert.True(File.Exists(Path.Combine(config.ConfigDirectory, AccountStore.FileName)));
+            Assert.DoesNotContain(
+                "\"accounts\"",
+                File.ReadAllText(Path.Combine(config.ConfigDirectory, "settings.json")));
+        });
+    }
+
+    private static void WithConfig(Action<ConfigService, TestLog, string> body)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "mcl-accounts-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+
+        try
+        {
+            var log = new TestLog();
+            var config = new ConfigService(
+                new JsonConfigStore(Path.Combine(root, "config"), log),
+                log,
+                includeBuiltInSecrets: false);
+            config.Load();
+            body(config, log, root);
+        }
+        finally
+        {
+            try
+            {
+                Directory.Delete(root, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
+        }
+    }
 }

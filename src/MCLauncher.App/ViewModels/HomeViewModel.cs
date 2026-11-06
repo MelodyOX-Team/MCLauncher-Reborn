@@ -96,6 +96,9 @@ public sealed class HomeViewModel : ViewModelBase
         Refresh();
     }
 
+    /// <summary>启动时没有任何可用账号：由外层弹出添加账号窗口。</summary>
+    public event EventHandler? AccountRequired;
+
     public ObservableCollection<InstalledVersionInfo> Versions { get; } = new();
 
     public InstalledVersionInfo? SelectedVersion
@@ -757,6 +760,15 @@ public sealed class HomeViewModel : ViewModelBase
         var server = _pendingServer;
         _pendingServer = null;
 
+        // 没有可用账号时不打开启动面板，直接让外层弹出「添加账户」窗口。
+        var account = _stack.Accounts.Selected;
+        if (account is null)
+        {
+            AccountRequired?.Invoke(this, EventArgs.Empty);
+            StatusText = "尚未添加账号，请先添加账号后再启动。";
+            return;
+        }
+
         // 记录启动时刻与实际游戏目录，退出后据此判断是否出现了新的崩溃报告。
         var launchedAt = DateTime.Now;
         var instanceDirectory = _stack.GetInstanceDirectory(version.Id, _stack.IsIsolated(version.Id));
@@ -780,9 +792,6 @@ public sealed class HomeViewModel : ViewModelBase
 
         try
         {
-            var account = _stack.Accounts.Selected
-                          ?? throw new InvalidOperationException("尚未添加可用账号，请先在「账号」页添加。");
-
             if (account.IsDisabled)
             {
                 throw new InvalidOperationException(

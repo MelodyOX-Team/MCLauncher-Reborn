@@ -49,6 +49,7 @@ public sealed class SetupViewModel : ViewModelBase
     private string _customServerError = string.Empty;
     private bool _isCustomServerBusy;
     private int _accountCountAtDialogOpen;
+    private bool _closeAfterAccountAdded;
 
     public SetupViewModel(LauncherStack stack, bool needsSetup)
     {
@@ -341,6 +342,18 @@ public sealed class SetupViewModel : ViewModelBase
 
     // ---------------------------------------------------------------- 账户
 
+    /// <summary>
+    /// 启动游戏时没有任何可用账号：弹出初始化界面里的「添加账户」窗口，
+    /// 账号加好后自动收起整个初始化界面（内存与 Java 已沿用现有设置）。
+    /// </summary>
+    public void OpenAddAccountForLaunch()
+    {
+        _closeAfterAccountAdded = true;
+        IsOpen = true;
+        RefreshAccount();
+        OpenAddAccount();
+    }
+
     private void OpenAddAccount()
     {
         // 必须走属性赋值：XAML 里的 Accounts.* 绑定靠 PropertyChanged 重新解析。
@@ -428,6 +441,12 @@ public sealed class SetupViewModel : ViewModelBase
     {
         _accounts?.CloseDialogCommand.Execute(null);
         IsAddAccountOpen = false;
+
+        if (_closeAfterAccountAdded)
+        {
+            _closeAfterAccountAdded = false;
+            IsOpen = false;
+        }
     }
 
     /// <summary>添加账号成功后（账号页 VM 会广播 Changed）收起弹窗并显示账号 ID。</summary>
@@ -439,6 +458,13 @@ public sealed class SetupViewModel : ViewModelBase
         {
             _accounts?.CloseDialogCommand.Execute(null);
             IsAddAccountOpen = false;
+        }
+
+        if (_closeAfterAccountAdded && HasAccount)
+        {
+            _closeAfterAccountAdded = false;
+            IsAddAccountOpen = false;
+            IsOpen = false;
         }
     }
 

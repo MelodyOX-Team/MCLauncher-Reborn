@@ -173,9 +173,15 @@ public sealed class AppSettings
     public List<DetectedJava> DetectedJavas { get; set; } = new();
 
     // ---- 账号 ----
-    public List<Account> Accounts { get; set; } = new();
+    /// <summary>
+    /// 旧版 settings.json 中的账号列表。账号已独立保存到加密的 <c>mclcfg/accounts.json</c>，
+    /// 这里只为一次性迁移保留：迁移完成后置空，不再写回 settings.json。
+    /// </summary>
+    [JsonPropertyName("accounts")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public List<Account>? LegacyAccounts { get; set; }
 
-    /// <summary>当前选中的账号 UUID。</summary>
+    /// <summary>当前选中的账号 ID（对应 accounts.json 里账号的 UUID）。</summary>
     public string? SelectedAccountUuid { get; set; }
 
     /// <summary>已添加的外置登录认证服务器（默认带 LittleSkin）。</summary>

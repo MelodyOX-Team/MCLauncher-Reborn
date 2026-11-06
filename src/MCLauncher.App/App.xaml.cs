@@ -108,6 +108,12 @@ public partial class App : Application
                 }
             };
 
+            // 启动时没有可用账号：直接弹出初始化设置里的「添加账户」窗口，加完账号自动收起。
+            if (homePage is HomeViewModel launchHome)
+            {
+                launchHome.AccountRequired += (_, _) => setup.OpenAddAccountForLaunch();
+            }
+
             stack.GameCrashed += (_, args) => crashOverlay.Show(args);
 
             pageFactory.AttachNavigator(shellViewModel.NavigateTo);
