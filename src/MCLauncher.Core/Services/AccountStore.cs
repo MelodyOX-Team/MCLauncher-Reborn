@@ -84,6 +84,40 @@ public sealed class AccountStore
     }
 
     /// <summary>
+    /// 销毁本地账号凭据：删除 accounts.json（DPAPI 模式的软件私钥就在文件里）、清空内存列表、
+    /// 清掉 settings.json 里的当前账号 ID，并删除 TPM 中的持久化密钥。
+    /// </summary>
+    /// <param name="releaseMachineKey">
+    /// 是否同时删除 TPM 中的持久化密钥；测试中传 false，避免删掉开发机上真实账号正在用的密钥。
+    /// </param>
+    /// <returns>账号文件是否已删除（文件本来不存在也算成功）。</returns>
+    public bool Purge(bool releaseMachineKey = true)
+    {
+        var fileGone = true;
+        try
+        {
+            if (File.Exists(FilePath))
+            {
+                File.Delete(FilePath);
+            }
+        }
+        catch (Exception ex)
+        {
+            fileGone = false;
+            _log.Error($"删除账号文件失败：{FilePath}", ex);
+        }
+
+        _accounts.Clear();
+        _config.Settings.SelectedAccountUuid = null;
+        _config.Save();
+
+        // 即使文件删除失败也要释放 TPM 密钥：残留的 accounts.json 会变成无法解密的死文件。
+        var tpmReleased = releaseMachineKey && MachineKey.DeleteTpmKey();
+        _log.Info($"已销毁本地账号凭据（删除文件：{fileGone}，释放 TPM 密钥：{tpmReleased}）");
+        return fileGone;
+    }
+
+    /// <summary>
     /// 旧版把账号明文（令牌经 DPAPI）放在 settings.json 的 <c>accounts</c> 里。
     /// 首次以新版启动时自动迁移到加密的 accounts.json，并从 settings.json 移除。
     /// </summary>

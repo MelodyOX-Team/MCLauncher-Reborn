@@ -51,6 +51,12 @@ internal static class MachineKey
             fallback.Encrypt(data, RSAEncryptionPadding.OaepSHA256));
     }
 
+    /// <summary>
+    /// 销毁本机密钥：删除 TPM 中的持久化密钥；DPAPI 模式的软件私钥只保存在 accounts.json 里，
+    /// 随账号文件删除一起销毁。返回是否真的删掉了 TPM 密钥。
+    /// </summary>
+    public static bool DeleteTpmKey() => TpmMachineKey.Delete(TpmKeyName);
+
     public static byte[] Unwrap(string protector, string keyBlob, byte[] wrapped)
     {
         switch (protector)

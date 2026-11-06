@@ -190,6 +190,7 @@ public sealed class AccountsViewModel : ViewModelBase
         OpenPersonalizeCommand = new RelayCommand(OpenPersonalize);
         ApplyNoCapeCommand = new RelayCommand(() => _ = ApplyCapeAsync(null));
         ApplyCapeCommand = new AsyncRelayCommand<CapeItem>(ApplyCapeAsync);
+        PurgeCommand = new RelayCommand(PurgeAccounts);
 
         _loginCommand = new AsyncRelayCommand(LoginMicrosoftAsync, () => !IsBusy && HasMsClientId);
         LoginMicrosoftCommand = _loginCommand;
@@ -565,6 +566,9 @@ public sealed class AccountsViewModel : ViewModelBase
     /// <summary>检查单行账号是否可用。</summary>
     public ICommand CheckAccountCommand { get; }
 
+    /// <summary>销毁本地账号凭据并释放 TPM/DPAPI 本机密钥（不可恢复）。</summary>
+    public ICommand PurgeCommand { get; }
+
     // ---------------------------------------------------------------- 列表刷新
 
     public void Refresh()
@@ -858,6 +862,33 @@ public sealed class AccountsViewModel : ViewModelBase
             Refresh();
             _stack.RaiseChanged();
         }
+    }
+
+    /// <summary>
+    /// 销毁本地账号凭据：删除 accounts.json（含 DPAPI 私钥）并从 TPM 中删除持久化密钥。
+    /// 不可恢复，先弹窗确认。
+    /// </summary>
+    private void PurgeAccounts()
+    {
+        var message = "确定销毁本地账号凭据并释放本机密钥？\n\n"
+                      + "将删除加密的 accounts.json、清除当前账号，并从 TPM 中删除持久化密钥。"
+                      + "所有账号（含微软 / 外置登录令牌）都会从本启动器移除，无法恢复，需要重新登录。";
+
+        if (MessageBox.Show(message, "销毁本地账号凭据", MessageBoxButton.YesNo, MessageBoxImage.Warning)
+            != MessageBoxResult.Yes)
+        {
+            return;
+        }
+
+        CloseDialogs();
+        _skinAccount = null;
+
+        StatusText = _stack.Accounts.PurgeAllAccounts()
+            ? "已销毁本地账号凭据，并释放 TPM/DPAPI 本机密钥。"
+            : "账号文件删除失败，请查看日志后重试。";
+
+        Refresh();
+        _stack.RaiseChanged();
     }
 
     private void Select(AccountItem? item)

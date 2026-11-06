@@ -73,6 +73,48 @@ internal sealed class TpmMachineKey : IDisposable
         }
     }
 
+    /// <summary>删除 TPM 中的持久化密钥（释放本机密钥）；不存在或本机无 TPM 时返回 false。</summary>
+    public static bool Delete(string keyName)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        try
+        {
+            if (NCryptOpenStorageProvider(out var provider, ProviderName, 0) != 0)
+            {
+                return false;
+            }
+
+            try
+            {
+                if (NCryptOpenKey(provider, out var key, keyName, 0, 0) != 0)
+                {
+                    return false;
+                }
+
+                try
+                {
+                    return NCryptDeleteKey(key, 0) == 0;
+                }
+                finally
+                {
+                    NCryptFreeObject(key);
+                }
+            }
+            finally
+            {
+                NCryptFreeObject(provider);
+            }
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+    }
+
     /// <summary>用 TPM 密钥的公开部分做 RSA-OAEP(SHA-256) 加密。</summary>
     public byte[] Wrap(byte[] data)
     {
@@ -191,6 +233,9 @@ internal sealed class TpmMachineKey : IDisposable
 
     [DllImport("ncrypt.dll")]
     private static extern int NCryptFinalizeKey(IntPtr hKey, uint dwFlags);
+
+    [DllImport("ncrypt.dll")]
+    private static extern int NCryptDeleteKey(IntPtr hKey, uint dwFlags);
 
     [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
     private static extern int NCryptExportKey(

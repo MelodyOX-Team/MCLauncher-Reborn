@@ -298,6 +298,12 @@
                     <Border DockPanel.Dock="Bottom" Padding="10,8" Background="#F7F7F7"
                             BorderBrush="{StaticResource ContentBorderBrush}" BorderThickness="0,1,0,0">
                         <DockPanel>
+                            <Button DockPanel.Dock="Right"
+                                    Style="{StaticResource SkinButton}"
+                                    Command="{Binding PurgeCommand}"
+                                    Content="释放 TPM/DPAPI"
+                                    Width="132" Height="28" FontSize="12" Margin="12,0,0,0"
+                                    ToolTip="销毁本地账号凭据：删除 accounts.json 并从 TPM 中删除持久化密钥"/>
                             <StackPanel Orientation="Horizontal" DockPanel.Dock="Left">
                                 <Button Style="{StaticResource SkinButton}"
                                         Command="{Binding SelectCommand}"

@@ -148,6 +148,12 @@ public sealed class AccountService
         return true;
     }
 
+    /// <summary>
+    /// 销毁本地账号凭据：删除加密的 accounts.json、清空当前账号、释放 TPM/DPAPI 本机密钥。
+    /// 不可恢复，调用方应先向用户确认。
+    /// </summary>
+    public bool PurgeAllAccounts(bool releaseMachineKey = true) => _store.Purge(releaseMachineKey);
+
     /// <summary>账号列表与当前选择一起落盘（账号到 accounts.json，选择到 settings.json）。</summary>
     private void Persist()
     {

@@ -218,6 +218,25 @@ public sealed class AccountTests
         });
     }
 
+    [Fact]
+    public void 销毁本机凭据后账号文件删除且当前账号置空()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var service = new AccountService(config, log);
+            service.AddOffline("销毁测试");
+
+            Assert.True(service.PurgeAllAccounts(releaseMachineKey: false));
+            Assert.False(File.Exists(Path.Combine(config.ConfigDirectory, AccountStore.FileName)));
+            Assert.Empty(service.Accounts);
+            Assert.Null(config.Settings.SelectedAccountUuid);
+
+            var reloaded = new AccountService(config, log);
+            Assert.Empty(reloaded.Accounts);
+            Assert.Null(reloaded.Selected);
+        });
+    }
+
     private static void WithConfig(Action<ConfigService, TestLog, string> body)
     {
         var root = Path.Combine(Path.GetTempPath(), "mcl-accounts-" + Guid.NewGuid().ToString("N"));
