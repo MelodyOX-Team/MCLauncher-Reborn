@@ -53,7 +53,6 @@ public sealed class ConnectViewModel : ViewModelBase
 
     // ---- 樱花穿透 ----
     private string _frpAccessKey = string.Empty;
-    private string _frpTunnelId = string.Empty;
     private string _frpStatusText = "尚未启动";
     private string _frpRemoteAddress = string.Empty;
     private bool _isFrpRunning;
@@ -65,7 +64,6 @@ public sealed class ConnectViewModel : ViewModelBase
     private readonly AsyncRelayCommand _openTunnelEditorCommand;
     private readonly AsyncRelayCommand _createTunnelCommand;
     private readonly AsyncRelayCommand<FrpTunnelItem> _deleteTunnelCommand;
-    private readonly RelayCommand<FrpTunnelItem> _useTunnelCommand;
     private readonly RelayCommand _scanLocalPortsCommand;
     private readonly RelayCommand _closeTunnelEditorCommand;
     private readonly Dictionary<int, string> _frpNodeNames = new();
@@ -80,8 +78,6 @@ public sealed class ConnectViewModel : ViewModelBase
     private FrpNodeOption? _selectedTunnelNode;
     private LocalPortOption? _selectedLocalPort;
     private FrpTunnelItem? _selectedTunnel;
-    private bool _suppressTunnelAutoStart;
-    private int _runningTunnelId;
 
     // ---- 陶瓦联机 ----
     private string _tcPlayerName = string.Empty;
@@ -109,7 +105,6 @@ public sealed class ConnectViewModel : ViewModelBase
         _launchServer = launchServer;
 
         _frpAccessKey = stack.Config.Settings.FrpAccessKey ?? string.Empty;
-        _frpTunnelId = stack.Config.Settings.FrpTunnelId ?? string.Empty;
         _frpBinaryReady = stack.Frp.IsBinaryReady();
         _tcPlayerName = stack.Config.Settings.TerracottaPlayerName
                         ?? stack.Accounts.Selected?.Name
@@ -141,7 +136,7 @@ public sealed class ConnectViewModel : ViewModelBase
             () => !IsFrpRunning
                   && !IsFrpInstalling
                   && !string.IsNullOrWhiteSpace(FrpAccessKey)
-                  && !string.IsNullOrWhiteSpace(FrpTunnelId),
+                  && FrpTunnels.Any(t => t.IsSelected),
             ex => FrpStatusText = ex.Message);
         _stopFrpCommand = new AsyncRelayCommand(
             StopFrpAsync,
@@ -170,7 +165,6 @@ public sealed class ConnectViewModel : ViewModelBase
         _deleteTunnelCommand = new AsyncRelayCommand<FrpTunnelItem>(
             DeleteTunnelAsync,
             _ => !IsFrpBusy);
-        _useTunnelCommand = new RelayCommand<FrpTunnelItem>(UseTunnel);
         _scanLocalPortsCommand = new RelayCommand(ScanLocalPorts);
         _closeTunnelEditorCommand = new RelayCommand(() => IsTunnelEditorOpen = false);
 
@@ -367,18 +361,6 @@ public sealed class ConnectViewModel : ViewModelBase
         }
     }
 
-    public string FrpTunnelId
-    {
-        get => _frpTunnelId;
-        set
-        {
-            if (SetProperty(ref _frpTunnelId, value))
-            {
-                RaiseCommandStates();
-            }
-        }
-    }
-
     public string FrpStatusText
     {
         get => _frpStatusText;
@@ -543,8 +525,6 @@ public sealed class ConnectViewModel : ViewModelBase
 
     public ICommand DeleteTunnelCommand => _deleteTunnelCommand;
 
-    public ICommand UseTunnelCommand => _useTunnelCommand;
-
     /// <summary>从下拉里选一个已检测到的端口，选中后自动写进「本地端口」。</summary>
     public LocalPortOption? SelectedLocalPort
     {
@@ -563,56 +543,18 @@ public sealed class ConnectViewModel : ViewModelBase
     public ICommand CloseTunnelEditorCommand => _closeTunnelEditorCommand;
 
     /// <summary>
-    /// 从账号隧道里选中的一条：选中即启动穿透。
-    /// 刷新列表时会用 <see cref="_suppressTunnelAutoStart"/> 抑制这次「选中」引发的启动。
+    /// 列表视觉选中项（保留 ListBox 高亮）。
+    /// 真正决定要穿透哪几条隧道的是每条的 <see cref="FrpTunnelItem.IsSelected"/> 勾选状态。
     /// </summary>
     public FrpTunnelItem? SelectedTunnel
     {
         get => _selectedTunnel;
         set
         {
-            if (!SetProperty(ref _selectedTunnel, value))
+            if (SetProperty(ref _selectedTunnel, value))
             {
-                return;
+                RaiseCommandStates();
             }
-
-            RaiseCommandStates();
-
-            if (value is null)
-            {
-                return;
-            }
-
-            FrpTunnelId = value.Id.ToString();
-
-            if (_suppressTunnelAutoStart || IsFrpInstalling)
-            {
-                return;
-            }
-
-            if (value.Status == 2)
-            {
-                FrpStatusText = string.IsNullOrWhiteSpace(value.StatusReason)
-                    ? $"隧道「{value.Name}」已被封禁，无法启动。"
-                    : $"隧道「{value.Name}」已被封禁：{value.StatusReason}";
-                return;
-            }
-
-            if (IsFrpRunning)
-            {
-                // 已经在跑别的隧道就换一条：先停再起，避免 frpc 拒绝重复启动。
-                if (_runningTunnelId == value.Id)
-                {
-                    return;
-                }
-
-                FrpStatusText = $"正在切换到隧道「{value.Name}」…";
-                _ = RestartSelectedTunnelAsync();
-                return;
-            }
-
-            FrpStatusText = $"正在启动隧道「{value.Name}」…";
-            _ = StartSelectedTunnelAsync();
         }
     }
 
@@ -1052,22 +994,27 @@ public sealed class ConnectViewModel : ViewModelBase
 
     private async Task StartFrpAsync()
     {
+        var selected = FrpTunnels.Where(t => t.IsSelected && t.Status != 2).ToList();
+        if (selected.Count == 0)
+        {
+            FrpStatusText = "请先勾选至少一条正常状态的隧道。";
+            return;
+        }
+
         _stack.Config.Settings.FrpAccessKey = FrpAccessKey.Trim();
-        _stack.Config.Settings.FrpTunnelId = FrpTunnelId.Trim();
         _stack.Config.Save();
 
         FrpLogs.Clear();
         FrpStatusText = "正在准备 frpc…";
 
-        await _stack.Frp.StartAsync(FrpAccessKey, FrpTunnelId).ConfigureAwait(true);
-        _runningTunnelId = int.TryParse(FrpTunnelId.Trim(), out var id) ? id : 0;
+        var ids = selected.Select(t => t.Id.ToString()).ToList();
+        await _stack.Frp.StartAsync(FrpAccessKey, ids).ConfigureAwait(true);
         ApplyFrpState(_stack.Frp.State);
     }
 
     private async Task StopFrpAsync()
     {
         FrpStatusText = "正在停止 frpc…";
-        _runningTunnelId = 0;
         var state = await _stack.Frp.StopAsync().ConfigureAwait(true);
         ApplyFrpState(state);
     }
@@ -1256,11 +1203,12 @@ public sealed class ConnectViewModel : ViewModelBase
                     })
                 .ConfigureAwait(true);
 
-            FrpTunnelId = created.Id.ToString();
             IsTunnelEditorOpen = false;
             NewTunnelNote = string.Empty;
 
             await LoadFrpTunnelsAsync().ConfigureAwait(true);
+            // 新建的隧道自动勾选，方便直接点启动穿透。
+            if (FrpTunnels.FirstOrDefault(t => t.Id == created.Id) is { } newItem) newItem.IsSelected = true;
             FrpTunnelStatus = $"已创建隧道「{created.Name}」（#{created.Id}），远程地址 {created.Remote ?? "由服务端分配"}。";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
@@ -1297,12 +1245,8 @@ public sealed class ConnectViewModel : ViewModelBase
                 .DeleteTunnelsAsync(FrpAccessKey.Trim(), new[] { item.Id })
                 .ConfigureAwait(true);
 
-            if (IsCurrentTunnelId(item.Id))
-            {
-                FrpTunnelId = string.Empty;
-                _stack.Config.Settings.FrpTunnelId = null;
-                _stack.Config.Save();
-            }
+            // 如果这条正在穿透就停掉它。
+            await _stack.Frp.StopOneAsync(item.Id.ToString()).ConfigureAwait(true);
 
             await LoadFrpTunnelsAsync().ConfigureAwait(true);
             FrpTunnelStatus = $"已删除隧道「{item.Name}」。";
@@ -1317,80 +1261,32 @@ public sealed class ConnectViewModel : ViewModelBase
         }
     }
 
-    private bool IsCurrentTunnelId(int id) =>
-        int.TryParse(FrpTunnelId.Trim(), out var current) && current == id;
-
-    private void UseTunnel(FrpTunnelItem? item)
-    {
-        if (item is null)
-        {
-            return;
-        }
-
-        // 选中的还是同一条（比如停了之后又点「启动」）：直接再拉起来。
-        if (ReferenceEquals(SelectedTunnel, item))
-        {
-            FrpTunnelId = item.Id.ToString();
-            FrpStatusText = $"正在启动隧道「{item.Name}」…";
-            _ = StartSelectedTunnelAsync();
-            return;
-        }
-
-        SelectedTunnel = item;
-    }
-
     /// <summary>
-    /// 重建隧道列表并尽量保留原来的选中项。刷新期间抑制自动启动，
-    /// 否则每次刷新都会把正在用的隧道重新拉起一遍。
+    /// 重建隧道列表并保留原来的勾选状态（刷新时不丢用户勾选）。
     /// </summary>
     private void ApplyTunnels(IReadOnlyList<SakuraFrpTunnel> tunnels)
     {
-        var selectedId = SelectedTunnel?.Id;
+        var prevSelected = FrpTunnels
+            .Where(t => t.IsSelected)
+            .ToDictionary(t => t.Id, _ => true);
 
-        _suppressTunnelAutoStart = true;
-        try
+        FrpTunnels.Clear();
+        foreach (var tunnel in tunnels.OrderBy(t => t.Id))
         {
-            FrpTunnels.Clear();
-            foreach (var tunnel in tunnels.OrderBy(t => t.Id))
-            {
-                FrpTunnels.Add(FrpTunnelItem.From(tunnel, _frpNodeNames));
-            }
+            var item = FrpTunnelItem.From(tunnel, _frpNodeNames,
+                isSelected: prevSelected.TryGetValue(tunnel.Id, out _));
+            item.SelectionChanged += () => _startFrpCommand.RaiseCanExecuteChanged();
+            FrpTunnels.Add(item);
+        }
 
-            SelectedTunnel = (selectedId is { } id ? FrpTunnels.FirstOrDefault(t => t.Id == id) : null)
-                             ?? (int.TryParse(FrpTunnelId.Trim(), out var current)
-                                 ? FrpTunnels.FirstOrDefault(t => t.Id == current)
-                                 : null);
-        }
-        finally
+        // 视觉选中保留（如果原来有）
+        if (SelectedTunnel is { } oldSel)
         {
-            _suppressTunnelAutoStart = false;
+            SelectedTunnel = FrpTunnels.FirstOrDefault(t => t.Id == oldSel.Id) ?? FrpTunnels.FirstOrDefault();
         }
-    }
-
-    /// <summary>启动当前选中的隧道；被用户从列表里点选时自动触发。</summary>
-    private async Task StartSelectedTunnelAsync()
-    {
-        try
+        else
         {
-            await StartFrpAsync().ConfigureAwait(true);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            FrpStatusText = ex.Message;
-        }
-    }
-
-    /// <summary>换一条隧道：先停掉当前 frpc 再按新隧道启动。</summary>
-    private async Task RestartSelectedTunnelAsync()
-    {
-        try
-        {
-            await StopFrpAsync().ConfigureAwait(true);
-            await StartFrpAsync().ConfigureAwait(true);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            FrpStatusText = ex.Message;
+            SelectedTunnel = FrpTunnels.FirstOrDefault();
         }
     }
 
@@ -1673,7 +1569,7 @@ public sealed class ConnectViewModel : ViewModelBase
 }
 
 /// <summary>隧道列表里的一行。</summary>
-public sealed class FrpTunnelItem
+public class FrpTunnelItem : ViewModelBase
 {
     public required int Id { get; init; }
 
@@ -1694,6 +1590,24 @@ public sealed class FrpTunnelItem
 
     public string? StatusReason { get; init; }
 
+    /// <summary>是否勾选为要穿透的隧道（可以勾多条）。</summary>
+    public bool IsSelected
+    {
+        get => _isSelected;
+        set
+        {
+            if (SetProperty(ref _isSelected, value))
+            {
+                SelectionChanged?.Invoke();
+            }
+        }
+    }
+
+    private bool _isSelected;
+
+    /// <summary>勾选状态变化时通知外层 ConnectViewModel 刷新 StartFrpCommand 的 CanExecute。</summary>
+    public event Action? SelectionChanged;
+
     public string Title => $"{Name}  #{Id}";
 
     public string Detail =>
@@ -1704,7 +1618,7 @@ public sealed class FrpTunnelItem
         ? string.IsNullOrWhiteSpace(StatusReason) ? "已封禁" : $"已封禁：{StatusReason}"
         : Online ? "在线" : "离线";
 
-    public static FrpTunnelItem From(SakuraFrpTunnel tunnel, IReadOnlyDictionary<int, string> nodeNames) => new()
+    public static FrpTunnelItem From(SakuraFrpTunnel tunnel, IReadOnlyDictionary<int, string> nodeNames, bool isSelected = false) => new()
     {
         Id = tunnel.Id,
         Name = tunnel.Name,
@@ -1715,6 +1629,7 @@ public sealed class FrpTunnelItem
         Online = tunnel.Online,
         Status = tunnel.Status,
         StatusReason = tunnel.StatusReason,
+        IsSelected = isSelected,
     };
 }
 

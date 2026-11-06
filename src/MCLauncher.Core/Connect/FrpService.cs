@@ -19,38 +19,38 @@ public enum FrpStatusKind
     Stopped,
 }
 
-/// <summary>樱花穿透（SakuraFrp）运行状态快照。</summary>
+/// <summary>樱花穿透（SakuraFrp）运行状态快照（多隧道汇总）。</summary>
 public sealed class FrpState
 {
     public FrpStatusKind Status { get; init; }
 
+    /// <summary>第一个已连通隧道的远程地址（兼容单隧道展示）。</summary>
     public string? RemoteAddress { get; init; }
+
+    /// <summary>所有已连通隧道的远程地址，key = 隧道 id。</summary>
+    public IReadOnlyDictionary<int, string> RemoteAddresses { get; init; } = new Dictionary<int, string>();
 
     public string Message { get; init; } = string.Empty;
 
-    public int ProcessId { get; init; }
+    public int RunningTunnelCount { get; init; }
 
     public IReadOnlyList<string> Logs { get; init; } = Array.Empty<string>();
 }
 
 /// <summary>
-/// 樱花穿透 frpc 集成：使用 SakuraFrp 官方 frpc 客户端与访问密钥/隧道 ID 建立 TCP 隧道。
-/// 只负责下载官方客户端、启动进程并从日志里识别远程地址，不内置任何凭据。
+/// 樱花穿透 frpc 集成：使用 SakuraFrp 官方 frpc 客户端，支持同时启动多条隧道（多进程）。
+/// 每个隧道独立一个 frpc 进程，共用同一个 Job Object（启动器崩溃时内核级联清理）。
 /// </summary>
 public sealed class FrpService : IDisposable
 {
     private const string FrpcUrl =
         "https://nya.globalslb.net/natfrp/client/frpc/0.51.0-sakura-14/frpc_windows_amd64.exe";
 
-    /// <summary>
-    /// 固定版本官方客户端的 SHA-256。升级 frpc 时必须同步更新这里，
-    /// 否则校验失败会拒绝运行——这是刻意的「失败即关闭」。
-    /// </summary>
     private const string FrpcSha256 = "b705262edad9f0de04b38f342e811e9d97d0beada75edab3f790e105dcfb5234";
 
     private const long FrpcSize = 14_133_248;
 
-    private const int MaxLogLines = 200;
+    private const int MaxLogLines = 300;
 
     private static readonly Regex AnsiPattern = new(@"\x1b\[[0-9;]*[A-Za-z]", RegexOptions.Compiled);
 
@@ -74,7 +74,12 @@ public sealed class FrpService : IDisposable
     private readonly object _logLock = new();
     private readonly JobObject _job;
 
-    private Process? _process;
+    /// <summary>隧道 id → 进程。多进程并存，每个对应一条勾选的隧道。</summary>
+    private readonly Dictionary<string, Process> _processes = new();
+
+    /// <summary>隧道 id → 已解析出的远程地址。用于汇总状态。</summary>
+    private readonly Dictionary<int, string> _remoteAddresses = new();
+
     private FrpState _state = new() { Status = FrpStatusKind.Idle, Message = "尚未启动" };
     private int _epoch;
     private bool _binaryVerified;
@@ -92,19 +97,14 @@ public sealed class FrpService : IDisposable
 
     public event EventHandler<FrpState>? StateChanged;
 
-    /// <summary>每收到一行 frpc 日志时触发（已脱敏）。</summary>
+    /// <summary>每收到一行 frpc 日志时触发（已脱敏，带隧道 id 前缀）。</summary>
     public event EventHandler<string>? LogReceived;
 
     public string BinaryPath => Path.Combine(_directory, "frpc.exe");
 
-    /// <summary>frpc 是否已经下载并通过大小、PE 头与 SHA-256 校验。</summary>
     public bool IsBinaryReady()
     {
-        // 校验一次后缓存结果：14 MB 文件的 SHA-256 不应在界面线程上反复算。
-        if (_binaryVerified)
-        {
-            return File.Exists(BinaryPath);
-        }
+        if (_binaryVerified) return File.Exists(BinaryPath);
 
         if (!File.Exists(BinaryPath)
             || !IsLikelyFrpc(BinaryPath)
@@ -121,11 +121,7 @@ public sealed class FrpService : IDisposable
     public async Task EnsureBinaryAsync(Action<string>? log = null, CancellationToken ct = default)
     {
         var path = BinaryPath;
-
-        if (IsBinaryReady())
-        {
-            return;
-        }
+        if (IsBinaryReady()) return;
 
         Directory.CreateDirectory(_directory);
 
@@ -139,12 +135,7 @@ public sealed class FrpService : IDisposable
 
         try
         {
-            // 旧版本或校验失败的残留一律删掉，绝不把未校验的文件交给进程执行。
-            if (File.Exists(path))
-            {
-                TryDelete(path);
-            }
-
+            if (File.Exists(path)) TryDelete(path);
             _binaryVerified = false;
 
             var outcome = await _downloader
@@ -168,11 +159,9 @@ public sealed class FrpService : IDisposable
             }
 
             _binaryVerified = true;
-
             log?.Invoke("frpc 下载完成");
             _log.Info($"frpc 已就绪：{path}");
 
-            // 独立下载完成后把状态从「下载中」收回来，避免界面一直停在下载态。
             SetStateSafe(new FrpState
             {
                 Status = FrpStatusKind.Idle,
@@ -191,9 +180,7 @@ public sealed class FrpService : IDisposable
             });
             throw;
         }
-        catch (Exception ex) when (ex is IOException
-                                       or TaskCanceledException
-                                       or InvalidDataException)
+        catch (Exception ex) when (ex is IOException or TaskCanceledException or InvalidDataException)
         {
             TryDelete(path);
             SetStateSafe(new FrpState
@@ -207,10 +194,13 @@ public sealed class FrpService : IDisposable
         }
     }
 
-    /// <summary>启动隧道。accessKey 与 tunnelId 来自 https://www.natfrp.com/。</summary>
+    /// <summary>
+    /// 批量启动多条隧道。每个隧道独立一个 frpc 进程。
+    /// 已在运行但不在新列表里的隧道会被停止。
+    /// </summary>
     public async Task<FrpState> StartAsync(
         string accessKey,
-        string tunnelId,
+        IReadOnlyList<string> tunnelIds,
         CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(accessKey))
@@ -218,18 +208,22 @@ public sealed class FrpService : IDisposable
             throw new InvalidOperationException("请填写樱花穿透的访问密钥。");
         }
 
-        if (string.IsNullOrWhiteSpace(tunnelId))
+        if (tunnelIds is null || tunnelIds.Count == 0)
         {
-            throw new InvalidOperationException("请填写樱花穿透的隧道 ID。");
-        }
-
-        if (_process is not null && !_process.HasExited)
-        {
-            throw new InvalidOperationException("frpc 已在运行中，请先停止。");
+            throw new InvalidOperationException("请先勾选至少一条隧道。");
         }
 
         var key = accessKey.Trim();
-        var tunnel = tunnelId.Trim();
+        var ids = tunnelIds.Select(id => id.Trim())
+                           .Where(id => !string.IsNullOrWhiteSpace(id))
+                           .Distinct()
+                           .ToList();
+
+        if (ids.Count == 0)
+        {
+            throw new InvalidOperationException("没有有效的隧道 ID。");
+        }
+
         var epoch = ++_epoch;
 
         await EnsureBinaryAsync(ct: ct).ConfigureAwait(false);
@@ -238,91 +232,90 @@ public sealed class FrpService : IDisposable
             throw new OperationCanceledException("启动已取消");
         }
 
-        var startInfo = new ProcessStartInfo(BinaryPath)
+        // 停掉不再需要的隧道（用户之前勾过、现在没勾的）
+        var toStop = _processes.Keys.Except(ids).ToList();
+        foreach (var id in toStop)
         {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8,
-        };
-
-        startInfo.ArgumentList.Add("-f");
-        startInfo.ArgumentList.Add($"{key}:{tunnel}");
-        startInfo.ArgumentList.Add("--disable_log_color");
-
-        ClearLogs();
-        AppendLog($"启动命令：frpc -f {MaskKey(key)}:{tunnel} --disable_log_color");
-
-        var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
-
-        process.OutputDataReceived += (_, args) => HandleLine(key, args.Data);
-        process.ErrorDataReceived += (_, args) => HandleLine(key, args.Data);
-        process.Exited += (_, _) => HandleExit(epoch, process);
-
-        if (!process.Start())
-        {
-            process.Dispose();
-            throw new InvalidOperationException("无法启动 frpc 进程。");
+            await StopOneAsync(id).ConfigureAwait(false);
         }
-
-        // 挂到 Job Object：启动器崩溃/被杀时内核自动级联清理 frpc。
-        try
-        {
-            _job.AssignProcess(process);
-        }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-            // Job Object 分配失败不阻塞功能，只是失去崩溃时的自动清理保障。
-            _log.Warn("frpc 未成功挂到 Job Object，崩溃时可能残留子进程", ex);
-        }
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-
-        _process = process;
-        _log.Info($"已启动樱花穿透 frpc（PID {process.Id}，隧道 {tunnel}）");
 
         SetStateSafe(new FrpState
         {
             Status = FrpStatusKind.Starting,
-            Message = "正在连接 SakuraFrp…",
-            ProcessId = process.Id,
+            Message = ids.Count == 1
+                ? "正在连接樱花穿透…"
+                : $"正在连接樱花穿透（{ids.Count} 条隧道）…",
             Logs = SnapshotLogs(),
         });
 
+        ClearLogs();
+        AppendLog($"批量启动命令：frpc -f {MaskKey(key)}:<隧道ID> --disable_log_color（共 {ids.Count} 条）");
+
+        foreach (var tunnelId in ids)
+        {
+            if (epoch != _epoch)
+            {
+                throw new OperationCanceledException("启动已取消");
+            }
+
+            // 这条已经在跑了，跳过。
+            if (_processes.ContainsKey(tunnelId))
+            {
+                continue;
+            }
+
+            var process = CreateProcess(key, tunnelId, epoch);
+
+            try
+            {
+                if (!process.Start())
+                {
+                    process.Dispose();
+                    AppendLog($"[隧道 #{tunnelId}] 无法启动 frpc 进程");
+                    _log.Warn($"隧道 #{tunnelId} 无法启动 frpc 进程");
+                    continue;
+                }
+            }
+            catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                process.Dispose();
+                AppendLog($"[隧道 #{tunnelId}] 启动失败：{ex.Message}");
+                _log.Warn($"隧道 #{tunnelId} 启动失败", ex);
+                continue;
+            }
+
+            // 挂到 Job Object。Job Object 整个服务共用一个句柄，多条进程都放进去。
+            try
+            {
+                _job.AssignProcess(process);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                _log.Warn("frpc 未成功挂到 Job Object，崩溃时可能残留子进程", ex);
+            }
+
+            process.BeginOutputReadLine();
+            process.BeginErrorReadLine();
+
+            _processes[tunnelId] = process;
+            _log.Info($"已启动樱花穿透 frpc（PID {process.Id}，隧道 #{tunnelId}）");
+        }
+
+        RebuildState();
         return _state;
     }
 
+    /// <summary>停止所有隧道。</summary>
     public async Task<FrpState> StopAsync()
     {
         ++_epoch;
 
-        var process = _process;
-        _process = null;
-
-        if (process is not null)
+        foreach (var id in _processes.Keys.ToList())
         {
-            try
-            {
-                if (!process.HasExited)
-                {
-                    process.Kill(entireProcessTree: true);
-                }
-
-                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-                await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException)
-            {
-                _log.Warn("停止 frpc 超时或进程已退出", ex);
-            }
-            finally
-            {
-                process.Dispose();
-            }
+            await StopOneAsync(id).ConfigureAwait(false);
         }
+
+        _remoteAddresses.Clear();
 
         SetStateSafe(new FrpState
         {
@@ -334,75 +327,171 @@ public sealed class FrpService : IDisposable
         return _state;
     }
 
-    private void HandleLine(string accessKey, string? raw)
+    /// <summary>停止某一条隧道（其他不受影响）。</summary>
+    public async Task<FrpState> StopOneAsync(string tunnelId)
     {
-        if (string.IsNullOrWhiteSpace(raw))
+        var key = tunnelId.Trim();
+        if (!_processes.TryGetValue(key, out var process))
         {
-            return;
+            RebuildState();
+            return _state;
         }
+
+        _processes.Remove(key);
+        _remoteAddresses.Remove(int.TryParse(key, out var n) ? n : 0);
+
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            await process.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or OperationCanceledException)
+        {
+            _log.Warn($"停止隧道 #{key} 超时或进程已退出", ex);
+        }
+        finally
+        {
+            process.Dispose();
+        }
+
+        AppendLog($"[隧道 #{key}] 已停止");
+        RebuildState();
+        return _state;
+    }
+
+    private Process CreateProcess(string accessKey, string tunnelId, int epoch)
+    {
+        var startInfo = new ProcessStartInfo(BinaryPath)
+        {
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
+        };
+
+        startInfo.ArgumentList.Add("-f");
+        startInfo.ArgumentList.Add($"{accessKey}:{tunnelId}");
+        startInfo.ArgumentList.Add("--disable_log_color");
+
+        var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
+
+        process.OutputDataReceived += (_, args) => HandleLine(accessKey, tunnelId, epoch, args.Data);
+        process.ErrorDataReceived += (_, args) => HandleLine(accessKey, tunnelId, epoch, args.Data);
+        process.Exited += (_, _) => HandleExit(epoch, tunnelId, process);
+
+        return process;
+    }
+
+    private void HandleLine(string accessKey, string tunnelId, int epoch, string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return;
 
         var line = AnsiPattern.Replace(raw, string.Empty).Trim();
         var sanitized = line.Replace(accessKey, MaskKey(accessKey), StringComparison.Ordinal);
-        AppendLog(sanitized);
+        AppendLog($"[隧道 #{tunnelId}] {sanitized}");
+
+        if (epoch != _epoch) return;
 
         var status = ParseStatus(line);
         var address = ParseAddress(line);
+        var tunnelKey = int.TryParse(tunnelId, out var n) ? n : 0;
 
-        var current = _state;
-        var nextStatus = status ?? current.Status;
-        var nextAddress = address ?? current.RemoteAddress;
-
-        if (nextStatus == current.Status && nextAddress == current.RemoteAddress)
+        if (address is not null)
         {
+            _remoteAddresses[tunnelKey] = address;
+        }
+
+        if (status is not null)
+        {
+            AppendLog($"[隧道 #{tunnelId}] 状态变更：{status}");
+        }
+
+        RebuildState(status);
+    }
+
+    private void HandleExit(int epoch, string tunnelId, Process process)
+    {
+        if (epoch != _epoch) return;
+
+        var code = TryReadExitCode(process);
+        AppendLog($"[隧道 #{tunnelId}] frpc 已退出（code={code}）");
+        _log.Info($"隧道 #{tunnelId} frpc 已退出（code={code}）");
+
+        _processes.Remove(tunnelId);
+
+        if (int.TryParse(tunnelId, out var n))
+        {
+            _remoteAddresses.Remove(n);
+        }
+
+        try { process.Dispose(); } catch { }
+
+        RebuildState();
+    }
+
+    /// <summary>按当前所有存活进程 + 已解析地址重建汇总状态。</summary>
+    private void RebuildState(FrpStatusKind? forceStatus = null)
+    {
+        var alive = _processes.Values.Where(p => !p.HasExited).ToList();
+        var total = alive.Count;
+        var connected = _remoteAddresses.Count;
+
+        // 全部进程都退出了 → Error
+        if (total == 0)
+        {
+            var finalStatus = forceStatus ?? FrpStatusKind.Error;
+            var finalMessage = finalStatus switch
+            {
+                FrpStatusKind.AuthFailed => "访问密钥无效或已失效",
+                FrpStatusKind.TunnelOffline => "某些隧道不存在或已被禁用",
+                _ => connected > 0 ? "所有隧道已断开" : "frpc 进程已全部退出",
+            };
+
+            SetStateSafe(new FrpState
+            {
+                Status = finalStatus,
+                Message = finalMessage,
+                RemoteAddress = _remoteAddresses.Values.FirstOrDefault(),
+                RemoteAddresses = new Dictionary<int, string>(_remoteAddresses),
+                RunningTunnelCount = 0,
+                Logs = SnapshotLogs(),
+            });
             return;
         }
 
-        var message = nextStatus switch
+        // 至少还有一个进程活着
+        var remoteAddrs = new Dictionary<int, string>(_remoteAddresses);
+        var remote = remoteAddrs.Values.FirstOrDefault();
+        var hasConnected = remoteAddrs.Count > 0;
+
+        var status = forceStatus ?? (hasConnected ? FrpStatusKind.Running : FrpStatusKind.Starting);
+
+        var message = status switch
         {
             FrpStatusKind.AuthFailed => "访问密钥无效或已失效",
-            FrpStatusKind.TunnelOffline => "隧道不存在或已被禁用",
-            FrpStatusKind.Error => "frpc 进程异常退出",
-            FrpStatusKind.Running => nextAddress is null ? "已连接，等待远程地址" : $"已连接，远程地址 {nextAddress}",
-            _ => current.Message,
+            FrpStatusKind.TunnelOffline => "某些隧道不存在或已被禁用",
+            FrpStatusKind.Running => total == 1
+                ? $"已连接，远程地址 {remote}"
+                : $"已连接 {connected}/{total} 条隧道",
+            _ => total == 1
+                ? "正在连接樱花穿透…"
+                : $"正在连接樱花穿透（{total} 条隧道）…",
         };
 
         SetStateSafe(new FrpState
         {
-            Status = nextStatus,
-            RemoteAddress = nextAddress,
+            Status = status,
             Message = message,
-            ProcessId = _process?.Id ?? current.ProcessId,
-            Logs = SnapshotLogs(),
-        });
-    }
-
-    private void HandleExit(int epoch, Process process)
-    {
-        if (epoch != _epoch)
-        {
-            return;
-        }
-
-        var code = TryReadExitCode(process);
-        AppendLog($"frpc 已退出（code={code}）");
-        _log.Info($"frpc 已退出（code={code}）");
-
-        if (_process != process)
-        {
-            return;
-        }
-
-        _process = null;
-
-        SetStateSafe(new FrpState
-        {
-            Status = _state.Status is FrpStatusKind.AuthFailed or FrpStatusKind.TunnelOffline
-                ? _state.Status
-                : FrpStatusKind.Error,
-            RemoteAddress = null,
-            Message = _state.Status is FrpStatusKind.AuthFailed or FrpStatusKind.TunnelOffline
-                ? _state.Message
-                : "frpc 进程异常退出",
+            RemoteAddress = remote,
+            RemoteAddresses = remoteAddrs,
+            RunningTunnelCount = total,
             Logs = SnapshotLogs(),
         });
     }
@@ -499,14 +588,8 @@ public sealed class FrpService : IDisposable
 
     private static int? TryReadExitCode(Process process)
     {
-        try
-        {
-            return process.ExitCode;
-        }
-        catch (InvalidOperationException)
-        {
-            return null;
-        }
+        try { return process.ExitCode; }
+        catch (InvalidOperationException) { return null; }
     }
 
     private static bool IsLikelyFrpc(string path)
@@ -514,43 +597,28 @@ public sealed class FrpService : IDisposable
         try
         {
             var info = new FileInfo(path);
-            if (!info.Exists || info.Length < 1_000_000)
-            {
-                return false;
-            }
+            if (!info.Exists || info.Length < 1_000_000) return false;
 
             using var stream = File.OpenRead(path);
             var b0 = stream.ReadByte();
             var b1 = stream.ReadByte();
             return b0 == 'M' && b1 == 'Z';
         }
-        catch (IOException)
-        {
-            return false;
-        }
+        catch (IOException) { return false; }
     }
 
     private static void TryDelete(string path)
     {
         try
         {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
+            if (File.Exists(path)) File.Delete(path);
         }
-        catch (IOException)
-        {
-        }
+        catch (IOException) { }
     }
 
     private static string MaskKey(string key)
     {
-        if (key.Length == 0)
-        {
-            return string.Empty;
-        }
-
+        if (key.Length == 0) return string.Empty;
         return key.Length <= 4
             ? new string('*', key.Length)
             : $"{key[..2]}***{key[^2..]}";
@@ -559,43 +627,31 @@ public sealed class FrpService : IDisposable
     public void Dispose()
     {
         ++_epoch;
-        var process = _process;
-        _process = null;
 
-        if (process is not null)
+        foreach (var id in _processes.Keys.ToList())
         {
+            var process = _processes[id];
+            _processes.Remove(id);
             try
             {
                 if (!process.HasExited)
                 {
                     process.Kill(entireProcessTree: true);
                 }
-
-                // 最多等 3 秒让进程彻底退出，避免句柄泄漏。
-                try
-                {
-                    process.WaitForExit(3000);
-                }
-                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-                {
-                }
+                try { process.WaitForExit(3000); } catch { }
             }
-            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-            {
-            }
+            catch { }
             finally
             {
-                process.Dispose();
+                try { process.Dispose(); } catch { }
             }
         }
 
-        // 关闭 Job Object 句柄：内核自动级联杀掉 Job 里所有剩余子进程，
-        // 这是启动器崩溃/被 Task Manager 杀掉时的最后一道防线。
+        _remoteAddresses.Clear();
+
+        // Job Object 句柄关闭 → 内核自动级联杀所有子进程。
         _job.Dispose();
 
-        if (_ownsDownloader)
-        {
-            _downloader.Dispose();
-        }
+        if (_ownsDownloader) _downloader.Dispose();
     }
 }
