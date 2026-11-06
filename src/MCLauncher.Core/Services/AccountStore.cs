@@ -24,6 +24,8 @@ public sealed class AccountStore
     private readonly ConfigService _config;
     private readonly ILogger _log;
     private readonly List<Account> _accounts = new();
+    private bool _loadFailed;
+    private bool _blockOverwrite;
 
     public AccountStore(ConfigService config, ILogger log)
     {
@@ -38,10 +40,14 @@ public sealed class AccountStore
 
     public string FilePath => Path.Combine(_config.ConfigDirectory, FileName);
 
-    /// <summary>读取账号文件；文件缺失、损坏或无法解密时按「没有账号」处理，而不是崩溃。</summary>
+    /// <summary>
+    /// 读取账号文件；文件缺失、损坏或无法解密时按「没有账号」处理，而不是崩溃。
+    /// 无法解密时把文件改名保留（<c>accounts-unreadable-*.json</c>），避免后续保存把原文件覆盖掉。
+    /// </summary>
     public void Load()
     {
         _accounts.Clear();
+        _loadFailed = false;
 
         var path = FilePath;
         if (File.Exists(path))
@@ -54,12 +60,21 @@ public sealed class AccountStore
                     throw new InvalidDataException("accounts.json 内容为空");
                 }
 
-                _accounts.AddRange(AccountsVaultCrypto.Open(vault));
+                _accounts.AddRange(AccountsVaultCrypto.Open(vault, out var usedFallback));
                 _log.Info($"已加载加密账号文件（{vault.Protector}），共 {_accounts.Count} 个账号");
+
+                // TPM 密钥被系统清除/重建时，用 DPAPI 备份救回账号，并重新封装一次文件。
+                if (usedFallback)
+                {
+                    _log.Warn("TPM 密钥已失效，已通过 DPAPI 备份解开账号，正在重新加密保存");
+                    Save();
+                }
             }
             catch (Exception ex)
             {
+                _loadFailed = true;
                 _log.Warn($"accounts.json 无法解密，按没有账号处理：{path}", ex);
+                PreserveUnreadableFile(path);
                 _accounts.Clear();
             }
         }
@@ -68,12 +83,44 @@ public sealed class AccountStore
         ValidateSelection();
     }
 
-    /// <summary>把账号列表加密写回 accounts.json；失败时保留内存中的账号并返回 false。</summary>
-    public bool Save()
+    /// <summary>
+    /// 把无法解密的账号文件改名保留，避免它被下一次保存直接覆盖。
+    /// 用户若之后修好 TPM/换回原来的 Windows 账户，仍可从这个备份里找回账号。
+    /// </summary>
+    private bool PreserveUnreadableFile(string path)
     {
         try
         {
-            JsonUtil.SerializeToFile(FilePath, AccountsVaultCrypto.Seal(_accounts));
+            var backup = Path.Combine(
+                _config.ConfigDirectory,
+                $"accounts-unreadable-{DateTime.Now:yyyyMMdd-HHmmss}.json");
+            File.Move(path, backup, overwrite: true);
+            _log.Warn($"已将无法解密的账号文件保留为：{backup}");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _blockOverwrite = true;
+            _log.Error("保留无法解密的账号文件失败，本次不写入账号文件以免覆盖", ex);
+            return false;
+        }
+    }
+
+    /// <summary>把账号列表加密写回 accounts.json；失败时保留内存中的账号并返回 false。</summary>
+    public bool Save()
+    {
+        if (_blockOverwrite)
+        {
+            _log.Error($"上次无法解密的账号文件没能备份，拒绝覆盖：{FilePath}");
+            return false;
+        }
+
+        try
+        {
+            var vault = AccountsVaultCrypto.Seal(
+                _accounts,
+                reason => _log.Warn($"TPM 不可用，本次用 DPAPI 保护账号：{reason}"));
+            JsonUtil.SerializeToFile(FilePath, vault);
             return true;
         }
         catch (Exception ex)
@@ -105,6 +152,19 @@ public sealed class AccountStore
         {
             fileGone = false;
             _log.Error($"删除账号文件失败：{FilePath}", ex);
+        }
+
+        // 连同「无法解密」的备份一起销毁，否则令牌仍以密文形式留在磁盘上。
+        foreach (var backup in Directory.GetFiles(_config.ConfigDirectory, "accounts-unreadable-*.json"))
+        {
+            try
+            {
+                File.Delete(backup);
+            }
+            catch (Exception ex)
+            {
+                _log.Warn($"删除账号备份失败：{backup}", ex);
+            }
         }
 
         _accounts.Clear();
@@ -146,6 +206,12 @@ public sealed class AccountStore
     /// <summary>当前账号 ID 指向的账号不存在（例如 accounts.json 被删除/替换）时清空选择。</summary>
     private void ValidateSelection()
     {
+        // 解密失败时不要动用户的指向：账号文件已保留为备份，修好本机密钥后仍能恢复。
+        if (_loadFailed)
+        {
+            return;
+        }
+
         var uuid = _config.Settings.SelectedAccountUuid;
         if (string.IsNullOrWhiteSpace(uuid))
         {
@@ -180,9 +246,19 @@ internal sealed class AccountsVault
     [JsonPropertyName("machineKey")]
     public string MachineKey { get; set; } = string.Empty;
 
-    /// <summary>本机密钥包装后的数据密钥（Base64）。</summary>
+    /// <summary>本机密钥包装后的数据密钥（Base64）。TPM 密钥失效时用下面的 DPAPI 备份解开。</summary>
     [JsonPropertyName("outer")]
     public string Outer { get; set; } = string.Empty;
+
+    /// <summary>DPAPI 兜底备份的受保护软件私钥（Base64）；仅 TPM 模式会写入。</summary>
+    [JsonPropertyName("machineKeyFallback")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? MachineKeyFallback { get; set; }
+
+    /// <summary>DPAPI 兜底备份包装后的数据密钥（Base64）。</summary>
+    [JsonPropertyName("outerFallback")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? OuterFallback { get; set; }
 
     /// <summary>AES-256-GCM 加密的账号列表（Base64：nonce + tag + ciphertext）。</summary>
     [JsonPropertyName("payload")]

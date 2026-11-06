@@ -16,7 +16,10 @@ internal static class MachineKey
 
     public sealed record SealedBlob(string Protector, string KeyBlob, byte[] Wrapped);
 
-    public static SealedBlob Wrap(byte[] data)
+    /// <summary>
+    /// 用本机密钥包装：优先 TPM，失败则用 DPAPI 保护的软件私钥。
+    /// </summary>
+    public static SealedBlob Wrap(byte[] data, Action<string>? onTpmFailure = null)
     {
         if (OperatingSystem.IsWindows())
         {
@@ -25,14 +28,41 @@ internal static class MachineKey
             {
                 try
                 {
-                    return new SealedBlob("tpm2", TpmKeyName, tpm.Wrap(data));
+                    var wrapped = tpm.Wrap(data);
+
+                    // 立即用同一密钥回解验证：TPM 密钥可能是签名专用、或本机驱动不支持 OAEP，
+                    // 这种情况下写出去的账号文件重启后必然解不开，必须直接降级到 DPAPI。
+                    var check = tpm.Unwrap(wrapped);
+                    if (CryptographicOperations.FixedTimeEquals(check, data))
+                    {
+                        return new SealedBlob("tpm2", TpmKeyName, wrapped);
+                    }
+
+                    onTpmFailure?.Invoke("回解结果与原文不一致");
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
-                    // TPM 不可用（例如策略禁用、密钥被清除）：继续走 DPAPI 降级。
+                    // TPM 不可用（例如策略禁用、密钥被清除、驱动不支持 OAEP）：继续走 DPAPI 降级。
+                    onTpmFailure?.Invoke(ex.Message);
                 }
             }
+            else
+            {
+                onTpmFailure?.Invoke("无法打开或创建 TPM 密钥");
+            }
+        }
 
+        return WrapSoftware(data);
+    }
+
+    /// <summary>
+    /// 系统级方案：临时生成软件 RSA 私钥，用 DPAPI(CurrentUser) 加密后随文件保存。
+    /// 非 Windows 开发环境没有 DPAPI，只能退回未绑定的明文私钥。
+    /// </summary>
+    public static SealedBlob WrapSoftware(byte[] data)
+    {
+        if (OperatingSystem.IsWindows())
+        {
             using var rsa = RSA.Create(2048);
             var protectedKey = ProtectedData.Protect(
                 rsa.ExportRSAPrivateKey(), DpapiEntropy, DataProtectionScope.CurrentUser);
@@ -57,16 +87,25 @@ internal static class MachineKey
     /// </summary>
     public static bool DeleteTpmKey() => TpmMachineKey.Delete(TpmKeyName);
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static byte[] UnwrapWithTpm(string keyBlob, byte[] wrapped)
+    {
+        using var tpm = TpmMachineKey.TryOpen(keyBlob)
+                        ?? throw new InvalidOperationException("TPM 密钥不可用，无法解密账号文件");
+        return tpm.Unwrap(wrapped);
+    }
+
     public static byte[] Unwrap(string protector, string keyBlob, byte[] wrapped)
     {
         switch (protector)
         {
             case "tpm2":
-            {
-                using var tpm = TpmMachineKey.TryOpen(keyBlob)
-                                ?? throw new InvalidOperationException("TPM 密钥不可用，无法解密账号文件");
-                return tpm.Unwrap(wrapped);
-            }
+                if (!OperatingSystem.IsWindows())
+                {
+                    throw new PlatformNotSupportedException("TPM 仅在 Windows 上可用，无法解密账号文件");
+                }
+
+                return UnwrapWithTpm(keyBlob, wrapped);
 
             case "dpapi":
             {

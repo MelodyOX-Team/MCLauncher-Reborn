@@ -264,17 +264,33 @@ public sealed class AvatarService
 
     private void SavePng(BitmapSource head, string path)
     {
+        // 登录成功时主页与账号页会并发刷新同一个头像，直接 File.Create 会因独占占用互相冲突。
+        // 改成「写临时文件 + 原子替换」：并发写只有一个赢，双方都不再抛 IOException。
+        var tempPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
             Directory.CreateDirectory(_cacheDirectory);
-            using var output = File.Create(path);
-            var encoder = new PngBitmapEncoder();
-            encoder.Frames.Add(BitmapFrame.Create(head));
-            encoder.Save(output);
+            using (var output = File.Create(tempPath))
+            {
+                var encoder = new PngBitmapEncoder();
+                encoder.Frames.Add(BitmapFrame.Create(head));
+                encoder.Save(output);
+            }
+
+            File.Move(tempPath, path, overwrite: true);
         }
         catch (Exception ex)
         {
             _log.Warn($"保存账号头像缓存失败：{path}", ex);
+
+            try
+            {
+                File.Delete(tempPath);
+            }
+            catch
+            {
+                // 临时文件清理失败可以忽略，留在缓存目录里也无害。
+            }
         }
     }
 }

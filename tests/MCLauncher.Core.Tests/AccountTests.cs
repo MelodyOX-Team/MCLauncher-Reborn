@@ -237,6 +237,61 @@ public sealed class AccountTests
         });
     }
 
+    [Fact]
+    public void 无法解密的账号文件改名保留且不清空指向()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var path = Path.Combine(config.ConfigDirectory, AccountStore.FileName);
+            config.Settings.SelectedAccountUuid = "d958d2314b274db180f07c59a04ec611";
+            config.Save();
+
+            // 模拟 TPM 密钥失效后留下的旧文件：结构合法但密文解不开。
+            File.WriteAllText(
+                path,
+                "{\"version\":1,\"protector\":\"tpm2\","
+                + "\"machineKey\":\"MCLauncherReborn-Accounts-v1\",\"outer\":\"AAAA\",\"payload\":\"AAAA\"}");
+
+            var service = new AccountService(config, log);
+
+            Assert.Empty(service.Accounts);
+            Assert.False(File.Exists(path));
+            Assert.Single(Directory.GetFiles(config.ConfigDirectory, "accounts-unreadable-*.json"));
+            Assert.Equal("d958d2314b274db180f07c59a04ec611", config.Settings.SelectedAccountUuid);
+
+            // 备份之后仍能正常新增账号，并且新文件重启后能解密。
+            service.AddOffline("重新添加");
+            Assert.True(File.Exists(path));
+            Assert.Equal("重新添加", Assert.Single(new AccountService(config, log).Accounts).Name);
+        });
+    }
+
+    [Fact]
+    public void TPM密文失效时用DPAPI备份恢复账号()
+    {
+        WithConfig((config, log, dir) =>
+        {
+            var service = new AccountService(config, log);
+            service.AddOffline("兜底账号");
+
+            var path = Path.Combine(config.ConfigDirectory, AccountStore.FileName);
+            var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+
+            // 本机没有可用 TPM 时只写 DPAPI 一路，没有备份可测。
+            if (node["outerFallback"] is null)
+            {
+                return;
+            }
+
+            // 只破坏 TPM 那一路密文，模拟 TPM 密钥被系统清除后换成了新密钥。
+            node["outer"] = Convert.ToBase64String(new byte[256]);
+            File.WriteAllText(path, node.ToJsonString());
+
+            var reloaded = new AccountService(config, log);
+            Assert.Equal("兜底账号", Assert.Single(reloaded.Accounts).Name);
+        });
+    }
+
     private static void WithConfig(Action<ConfigService, TestLog, string> body)
     {
         var root = Path.Combine(Path.GetTempPath(), "mcl-accounts-" + Guid.NewGuid().ToString("N"));

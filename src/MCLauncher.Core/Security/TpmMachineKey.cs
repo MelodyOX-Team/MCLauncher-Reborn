@@ -15,10 +15,9 @@ internal sealed class TpmMachineKey : IDisposable
     private const string KeyUsageProperty = "KeyUsage";
     private const string PublicBlobType = "RSAPUBLICBLOB";
     private const uint AllowDecryptFlag = 0x00000001;
-    private const uint OaepFlag = 0x00000004;
+    private const uint OaepFlag = 0x00000004; // NCRYPT_PAD_OAEP_FLAG
     private const uint RsaPublicMagic = 0x31415352;
 
-    private IntPtr _sha256;
     private IntPtr _provider;
     private IntPtr _key;
 
@@ -26,7 +25,6 @@ internal sealed class TpmMachineKey : IDisposable
     {
         _provider = provider;
         _key = key;
-        _sha256 = Marshal.StringToHGlobalUni("SHA256");
     }
 
     /// <summary>打开（不存在时创建）一个 TPM 持久化 RSA-2048 密钥；任何失败都返回 null。</summary>
@@ -54,11 +52,12 @@ internal sealed class TpmMachineKey : IDisposable
                     return null;
                 }
 
-                SetDwordProperty(key, LengthProperty, 2048);
-                SetDwordProperty(key, KeyUsageProperty, (int)AllowDecryptFlag);
-
-                if (NCryptFinalizeKey(key, 0) != 0)
+                // 属性设置失败时会留下签名用途的密钥，必须清理掉，否则后续解密必然失败。
+                if (!SetDwordProperty(key, LengthProperty, 2048) ||
+                    !SetDwordProperty(key, KeyUsageProperty, (int)AllowDecryptFlag) ||
+                    NCryptFinalizeKey(key, 0) != 0)
                 {
+                    NCryptDeleteKey(key, 0);
                     NCryptFreeObject(key);
                     NCryptFreeObject(provider);
                     return null;
@@ -124,36 +123,55 @@ internal sealed class TpmMachineKey : IDisposable
         return rsa.Encrypt(data, RSAEncryptionPadding.OaepSHA256);
     }
 
-    /// <summary>用 TPM 内的私钥做 RSA-OAEP(SHA-256) 解密。</summary>
+    /// <summary>
+    /// 用 TPM 内的私钥做 RSA-OAEP 解密。优先 OAEP-SHA256，少数 TPM 固件只实现了 OAEP-SHA1，
+    /// 失败时自动退回。解密走 NCryptDecrypt，与创建/打开同一套 API，结构体用 Unicode 封送。
+    /// </summary>
     public byte[] Unwrap(byte[] data)
     {
-        var info = new BcryptOaepPaddingInfo
+        var status = TryDecrypt(data, "SHA256", out var result);
+        if (status == 0)
         {
-            pszAlgId = _sha256,
-            pbLabel = IntPtr.Zero,
-            cbLabel = 0,
-        };
+            return result;
+        }
+
+        // 部分固件只支持 OAEP-SHA1。
+        status = TryDecrypt(data, "SHA1", out result);
+        if (status != 0)
+        {
+            throw new InvalidOperationException($"TPM 解密失败（0x{status:X8}）");
+        }
+
+        return result;
+    }
+
+    private int TryDecrypt(byte[] data, string hashAlgorithm, out byte[] result)
+    {
+        var info = new BcryptOaepPaddingInfo { pszAlgId = hashAlgorithm, pbLabel = IntPtr.Zero, cbLabel = 0 };
 
         var status = NCryptDecrypt(_key, data, data.Length, ref info, null, 0, out var size, OaepFlag);
         if (status != 0)
         {
-            throw new InvalidOperationException($"TPM 解密失败（0x{status:X8}）");
+            result = Array.Empty<byte>();
+            return status;
         }
 
         var output = new byte[size];
         status = NCryptDecrypt(_key, data, data.Length, ref info, output, size, out size, OaepFlag);
         if (status != 0)
         {
-            throw new InvalidOperationException($"TPM 解密失败（0x{status:X8}）");
+            result = Array.Empty<byte>();
+            return status;
         }
 
-        return size == output.Length ? output : output[..size];
+        result = size == output.Length ? output : output[..size];
+        return 0;
     }
 
-    private static void SetDwordProperty(IntPtr key, string name, int value)
+    private static bool SetDwordProperty(IntPtr key, string name, int value)
     {
         var bytes = BitConverter.GetBytes(value);
-        NCryptSetProperty(key, name, bytes, bytes.Length, 0);
+        return NCryptSetProperty(key, name, bytes, bytes.Length, 0) == 0;
     }
 
     private RSAParameters ExportPublicParameters()
@@ -200,20 +218,6 @@ internal sealed class TpmMachineKey : IDisposable
             NCryptFreeObject(_provider);
             _provider = IntPtr.Zero;
         }
-
-        if (_sha256 != IntPtr.Zero)
-        {
-            Marshal.FreeHGlobal(_sha256);
-            _sha256 = IntPtr.Zero;
-        }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BcryptOaepPaddingInfo
-    {
-        public IntPtr pszAlgId;
-        public IntPtr pbLabel;
-        public int cbLabel;
     }
 
     [DllImport("ncrypt.dll", CharSet = CharSet.Unicode)]
@@ -249,4 +253,13 @@ internal sealed class TpmMachineKey : IDisposable
 
     [DllImport("ncrypt.dll")]
     private static extern int NCryptFreeObject(IntPtr hObject);
+
+    /// <summary>OAEP padding 结构体；pszAlgId 用 Unicode 封送，由运行时管理字符串生命周期。</summary>
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct BcryptOaepPaddingInfo
+    {
+        public string pszAlgId;
+        public IntPtr pbLabel;
+        public int cbLabel;
+    }
 }
