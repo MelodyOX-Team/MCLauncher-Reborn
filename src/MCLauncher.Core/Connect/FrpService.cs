@@ -72,6 +72,7 @@ public sealed class FrpService : IDisposable
     private readonly bool _ownsDownloader;
     private readonly List<string> _logs = new();
     private readonly object _logLock = new();
+    private readonly JobObject _job;
 
     private Process? _process;
     private FrpState _state = new() { Status = FrpStatusKind.Idle, Message = "尚未启动" };
@@ -84,6 +85,7 @@ public sealed class FrpService : IDisposable
         _directory = Path.Combine(configDirectory, "frp");
         _downloader = downloader ?? new HttpDownloader(log);
         _ownsDownloader = downloader is null;
+        _job = new JobObject();
     }
 
     public FrpState State => _state;
@@ -263,6 +265,17 @@ public sealed class FrpService : IDisposable
         {
             process.Dispose();
             throw new InvalidOperationException("无法启动 frpc 进程。");
+        }
+
+        // 挂到 Job Object：启动器崩溃/被杀时内核自动级联清理 frpc。
+        try
+        {
+            _job.AssignProcess(process);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            // Job Object 分配失败不阻塞功能，只是失去崩溃时的自动清理保障。
+            _log.Warn("frpc 未成功挂到 Job Object，崩溃时可能残留子进程", ex);
         }
 
         process.BeginOutputReadLine();
@@ -557,6 +570,15 @@ public sealed class FrpService : IDisposable
                 {
                     process.Kill(entireProcessTree: true);
                 }
+
+                // 最多等 3 秒让进程彻底退出，避免句柄泄漏。
+                try
+                {
+                    process.WaitForExit(3000);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                }
             }
             catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
             {
@@ -566,6 +588,10 @@ public sealed class FrpService : IDisposable
                 process.Dispose();
             }
         }
+
+        // 关闭 Job Object 句柄：内核自动级联杀掉 Job 里所有剩余子进程，
+        // 这是启动器崩溃/被 Task Manager 杀掉时的最后一道防线。
+        _job.Dispose();
 
         if (_ownsDownloader)
         {

@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MCLauncher.Core.Abstractions;
+using MCLauncher.Core.Utils;
 
 namespace MCLauncher.Core.Connect;
 
@@ -73,6 +74,7 @@ public sealed class TerracottaService : IDisposable
 
     private readonly ILogger _log;
     private readonly string _directory;
+    private readonly JobObject _job;
 
     private Process? _process;
     private HttpClient? _localHttp;
@@ -85,6 +87,7 @@ public sealed class TerracottaService : IDisposable
     {
         _log = log;
         _directory = Path.Combine(configDirectory, "terracotta");
+        _job = new JobObject();
     }
 
     public TerracottaState State => _state;
@@ -411,6 +414,16 @@ public sealed class TerracottaService : IDisposable
             throw new InvalidOperationException("无法启动陶瓦联机工具。");
         }
 
+        // 挂到 Job Object：启动器崩溃/被杀时内核自动级联清理陶瓦进程。
+        try
+        {
+            _job.AssignProcess(process);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            _log.Warn("陶瓦进程未成功挂到 Job Object，崩溃时可能残留子进程", ex);
+        }
+
         _process = process;
         _log.Info($"已启动陶瓦联机工具（PID {process.Id}）");
 
@@ -708,31 +721,64 @@ public sealed class TerracottaService : IDisposable
         _pollCts?.Dispose();
         _pollCts = null;
 
-        _localHttp?.Dispose();
+        // 先尝试优雅退出：陶瓦有 HTTP API /panic?peaceful=true 可以让它干净收尾。
+        var http = _localHttp;
         _localHttp = null;
+        if (http is not null)
+        {
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                try
+                {
+                    http.GetAsync("/panic?peaceful=true", cts.Token).GetAwaiter().GetResult();
+                }
+                catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or IOException)
+                {
+                    // 进程可能已经退出，忽略。
+                }
+
+                http.Dispose();
+            }
+            catch (Exception ex) when (ex is not OutOfMemoryException)
+            {
+            }
+        }
 
         var process = _process;
         _process = null;
+        _busy = 0;
 
-        if (process is null)
+        if (process is not null)
         {
-            return;
-        }
-
-        try
-        {
-            if (!process.HasExited)
+            try
             {
-                process.Kill(entireProcessTree: true);
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+
+                // 最多等 3 秒让进程彻底退出。
+                try
+                {
+                    process.WaitForExit(3000);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+                {
+                }
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+            }
+            finally
+            {
+                process.Dispose();
             }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
-        {
-        }
-        finally
-        {
-            process.Dispose();
-        }
+
+        // 关闭 Job Object 句柄：内核自动级联杀掉 Job 里所有剩余子进程，
+        // 这是启动器崩溃/被 Task Manager 杀掉时的最后一道防线。
+        _job.Dispose();
     }
 
     private sealed record TerracottaAsset(
