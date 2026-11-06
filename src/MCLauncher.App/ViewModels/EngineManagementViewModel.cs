@@ -69,7 +69,7 @@ public sealed class EngineManagementViewModel : ViewModelBase
         OpenInstallCommand = new AsyncRelayCommand<EngineComponent>(OpenInstallAsync);
         ConfirmInstallCommand = new AsyncRelayCommand(InstallAsync);
         CancelInstallCommand = new RelayCommand(CloseDialog);
-        UninstallCommand = new RelayCommand<EngineComponent>(Uninstall);
+        UninstallCommand = new AsyncRelayCommand<EngineComponent>(UninstallAsync);
     }
 
     /// <summary>安装成功后创建了新实例，通知实例管理页切换过去。</summary>
@@ -338,6 +338,7 @@ public sealed class EngineManagementViewModel : ViewModelBase
         _installRows.Clear();
         InstallStatus = $"正在安装 {loaderName} {loaderVersion}…";
 
+        string? newInstanceId = null;
         try
         {
             var progress = new Progress<InstallProgress>(value =>
@@ -350,51 +351,36 @@ public sealed class EngineManagementViewModel : ViewModelBase
                 InstallProgress = value.Fraction;
             });
 
-            // 自洽实例已经把原版合并进自己目录，装载加载器前要先补回基底。
-            var baseInstalledNow = false;
-            if (!_stack.Repository.IsInstalled(_stack.GameRoot, _baseVersion))
-            {
-                InstallStatus = $"正在安装原版 {_baseVersion}…";
-                var baseReport = await _stack.InstallVersionAsync(_baseVersion, progress);
-                if (!baseReport.Success)
-                {
-                    throw new InvalidOperationException(
-                        $"原版 {_baseVersion} 安装失败：{baseReport.Failed} 个文件未能下载");
-                }
-
-                // 只为装加载器临时下载的原版基底，合并进新实例后清除。
-                _stack.Instances.MarkAsAutoBase(_stack.GameRoot, _baseVersion);
-                baseInstalledNow = true;
-            }
-
-            var result = await _stack.ModLoaders.InstallAsync(
-                new LoaderInstallRequest
-                {
-                    GameRoot = _stack.GameRoot,
-                    GameVersion = _baseVersion,
-                    Kind = kind,
-                    LoaderVersion = loaderVersion,
-                    InstallOptions = _stack.BuildInstallOptions(),
-                },
-                progress);
-
-            if (!result.Success || string.IsNullOrWhiteSpace(result.VersionId))
-            {
-                throw new InvalidOperationException(result.Error ?? "加载器安装失败");
-            }
+            // 原版 JSON 按需获取（本地没有就从版本清单下载），只在内存里与加载器合并。
+            var baseVersion = await _stack.GetBaseVersionJsonAsync(_baseVersion);
 
             var desiredName = $"{loaderName}{InstanceDisplay}";
-            var newInstanceId = _stack.Instances.CreateUniqueInstanceId(
+            newInstanceId = _stack.Instances.CreateUniqueInstanceId(
                 _stack.GameRoot, desiredName, $"{loaderName}{_baseVersion}");
 
-            _stack.Instances.AdoptLoaderVersion(
-                _stack.GameRoot,
-                result.VersionId!,
-                newInstanceId,
-                _baseVersion,
-                $"{loaderName} {loaderVersion}",
-                newInstanceId,
-                deleteBaseVersion: baseInstalledNow);
+            var loaderProfile = kind is ModLoaderKind.Fabric or ModLoaderKind.Quilt
+                ? await _stack.ModLoaders.GetFabricLikeProfileAsync(kind, _baseVersion, loaderVersion)
+                : await _stack.ModLoaders.GetForgeLikeVersionAsync(
+                    kind,
+                    _stack.GameRoot,
+                    _baseVersion,
+                    loaderVersion,
+                    baseVersion,
+                    VersionRepository.VersionJarPath(_stack.GameRoot, newInstanceId),
+                    _stack.BuildInstallOptions(),
+                    progress);
+
+            var report = await _stack.Installer.InstallInstanceAsync(
+                _stack.GameRoot, newInstanceId, baseVersion, loaderProfile,
+                _stack.BuildInstallOptions(), progress);
+
+            if (!report.Success)
+            {
+                throw new InvalidOperationException($"安装失败：{report.Failed} 个文件未能下载");
+            }
+
+            // 新实例默认开启版本隔离（mods / 存档 / 配置都放在 instances/<id> 下）。
+            _stack.Instances.SetIsolation(_stack.GameRoot, newInstanceId, true);
 
             _stack.Config.Settings.SelectedInstanceId = newInstanceId;
             _stack.Config.Save();
@@ -409,6 +395,19 @@ public sealed class EngineManagementViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
+            // 半成品会以「实例」身份出现在列表里，失败就整个删掉；libraries / assets 是共享的。
+            if (newInstanceId is not null)
+            {
+                try
+                {
+                    _stack.Instances.Delete(_stack.GameRoot, newInstanceId);
+                }
+                catch (Exception cleanup)
+                {
+                    _stack.Log.Warn($"清理未完成的实例 {newInstanceId} 失败", cleanup);
+                }
+            }
+
             _stack.Log.Error($"引擎管理安装 {loaderName} 失败", ex);
             InstallStatus = "安装失败：" + ex.Message;
         }
@@ -437,7 +436,7 @@ public sealed class EngineManagementViewModel : ViewModelBase
 
     // ---------------------------------------------------------------- 卸载
 
-    private void Uninstall(EngineComponent? component)
+    private async Task UninstallAsync(EngineComponent? component)
     {
         if (component?.Kind is null || !component.ShowUninstall || _instance is null)
         {
@@ -461,15 +460,25 @@ public sealed class EngineManagementViewModel : ViewModelBase
             return;
         }
 
-        if (_stack.Instances.RemoveLoader(_stack.GameRoot, _instanceId, baseVersion))
+        StatusText = $"正在卸载 {loaderName}…";
+
+        try
         {
-            _stack.RaiseChanged();
-            Show(_instanceId);
-            StatusText = $"已卸载 {loaderName}，实例已恢复为原版 {baseVersion}。";
+            if (await _stack.Instances.RemoveLoaderAsync(_stack.GameRoot, _instanceId, baseVersion))
+            {
+                _stack.RaiseChanged();
+                Show(_instanceId);
+                StatusText = $"已卸载 {loaderName}，实例已恢复为原版 {baseVersion}。";
+            }
+            else
+            {
+                StatusText = "卸载失败：找不到原版基底或版本 JSON 损坏。";
+            }
         }
-        else
+        catch (Exception ex)
         {
-            StatusText = "卸载失败：找不到原版基底或版本 JSON 损坏。";
+            _stack.Log.Error($"卸载 {loaderName} 失败", ex);
+            StatusText = "卸载失败：" + ex.Message;
         }
     }
 }

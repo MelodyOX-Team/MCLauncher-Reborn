@@ -8,7 +8,8 @@ using MCLauncher.Core.Models;
 namespace MCLauncher.App.ViewModels;
 
 /// <summary>
-/// 单个实例的独立设置：写入 <c>versions/&lt;id&gt;/.mclauncher/instance.json</c>，留空即跟随全局。
+/// 单个实例的独立设置：覆盖项保存在启动器全局设置里（按实例 id 索引），留空即跟随全局。
+/// 实例目录下不写任何配置文件；「实例名称」就是 <c>versions</c> 下的目录名。
 /// 由实例管理页的「游戏设置」在右侧原地展示。
 /// </summary>
 public sealed class InstanceSettingsViewModel : ViewModelBase
@@ -193,7 +194,8 @@ public sealed class InstanceSettingsViewModel : ViewModelBase
         _loadedInstanceId = _instanceId;
         var config = _stack.Instances.Load(_stack.GameRoot, _instanceId);
 
-        DisplayName = config.DisplayName ?? string.Empty;
+        // 显示名就是实例 id；这里作为可编辑的「实例名称」，保存时重命名目录。
+        DisplayName = _instanceId;
         SelectedIsolationOption = config.Isolated switch
         {
             true => "开启",
@@ -266,7 +268,6 @@ public sealed class InstanceSettingsViewModel : ViewModelBase
 
             var config = _stack.Instances.Load(_stack.GameRoot, _instanceId);
 
-            config.DisplayName = string.IsNullOrWhiteSpace(DisplayName) ? null : DisplayName.Trim();
             config.Isolated = SelectedIsolationOption switch
             {
                 "开启" => true,
@@ -289,7 +290,6 @@ public sealed class InstanceSettingsViewModel : ViewModelBase
             config.Height = height;
 
             _stack.Instances.Save(_stack.GameRoot, _instanceId, config);
-            _stack.Config.Save();
 
             _instance = _stack.GetInstalledVersions()
                 .FirstOrDefault(version => string.Equals(version.Id, _instanceId, StringComparison.OrdinalIgnoreCase));
@@ -321,7 +321,6 @@ public sealed class InstanceSettingsViewModel : ViewModelBase
         {
             var config = _stack.Instances.Load(_stack.GameRoot, _instanceId);
 
-            config.DisplayName = null;
             config.Isolated = null;
             config.MaxMemoryMb = null;
             config.MinMemoryMb = null;
@@ -333,7 +332,6 @@ public sealed class InstanceSettingsViewModel : ViewModelBase
             config.Height = null;
 
             _stack.Instances.Save(_stack.GameRoot, _instanceId, config);
-            _stack.Config.Save();
 
             _loadedInstanceId = null;
             _instance = _stack.GetInstalledVersions()

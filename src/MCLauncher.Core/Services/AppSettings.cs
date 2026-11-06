@@ -70,6 +70,13 @@ public sealed class AppSettings
 
     public string? SelectedInstanceId { get; set; }
 
+    /// <summary>
+    /// 按实例 id 索引的实例级覆盖项（隔离、内存、Java、额外参数、窗口）。
+    /// 与 HMCL 的 <c>instance-game-settings.json</c> 一样集中存放在启动器全局设置里，
+    /// 实例目录下不再写 <c>.mclauncher</c> 配置文件；没有覆盖项的实例不会产生条目。
+    /// </summary>
+    public Dictionary<string, InstanceConfig> InstanceOverrides { get; set; } = new();
+
     // ---- 下载 ----
     /// <summary>版本清单、版本 JSON 的下载源偏好。</summary>
     public DownloadSourcePreference VersionListSource { get; set; } = DownloadSourcePreference.Auto;

@@ -3,36 +3,15 @@ using System.Text.Json.Serialization;
 namespace MCLauncher.Core.Models;
 
 /// <summary>
-/// 实例（版本）级配置，存放在 <c>&lt;游戏目录&gt;/versions/&lt;id&gt;/.mclauncher/instance.json</c>。
-/// 「版本隔离」开启时，mods / 存档 / 配置都在 <c>versions/&lt;id&gt;</c> 下，
-/// 与原版共享的 <c>libraries</c>、<c>assets</c> 分开 —— 这样多个版本互不污染。
+/// 实例（版本）级覆盖项。保存在启动器全局设置 <c>mclcfg/settings.json</c> 的
+/// <c>instanceOverrides</c> 字典里（按实例 id 索引），版本目录下不写任何配置文件。
+/// 与 HMCL 的 <c>instance-game-settings.json</c> 思路一致：没有覆盖项的实例不产生条目。
 /// </summary>
 public sealed class InstanceConfig
 {
-    [JsonPropertyName("versionId")]
-    public string VersionId { get; set; } = string.Empty;
-
     /// <summary>是否启用版本隔离；null 表示跟随全局设置。</summary>
     [JsonPropertyName("isolated")]
     public bool? Isolated { get; set; }
-
-    /// <summary>界面展示名（可自定义，留空则用版本 id）。</summary>
-    [JsonPropertyName("displayName")]
-    public string? DisplayName { get; set; }
-
-    /// <summary>实例对应的原版游戏版本（自洽实例不再有 inheritsFrom，需要单独记录）。</summary>
-    [JsonPropertyName("gameVersion")]
-    public string? GameVersion { get; set; }
-
-    [JsonPropertyName("note")]
-    public string? Note { get; set; }
-
-    [JsonPropertyName("createdAt")]
-    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
-
-    /// <summary>该实例安装过的加载器描述（Forge 49.0.30 / Fabric 0.15.3 …）。</summary>
-    [JsonPropertyName("loaders")]
-    public List<string> Loaders { get; set; } = new();
 
     // ---- 实例级覆盖项：null 表示跟随全局设置 ----
 
@@ -60,4 +39,17 @@ public sealed class InstanceConfig
 
     [JsonPropertyName("windowMode")]
     public GameWindowMode? WindowMode { get; set; }
+
+    /// <summary>没有任何覆盖项；用于从全局设置里移除该实例的条目。</summary>
+    [JsonIgnore]
+    public bool IsEmpty =>
+        Isolated is null
+        && MaxMemoryMb is null
+        && MinMemoryMb is null
+        && JavaPath is null
+        && ExtraJvmArgs is null
+        && ExtraGameArgs is null
+        && Width is null
+        && Height is null
+        && WindowMode is null;
 }

@@ -14,9 +14,6 @@ public sealed class InstalledVersionInfo
 {
     public required string Id { get; init; }
 
-    /// <summary>实例展示名；为空时用版本 id。</summary>
-    public string? DisplayName { get; init; }
-
     /// <summary>继承的原版基底（加载器/实例版本才有）。</summary>
     public string? BaseVersionId { get; init; }
 
@@ -34,8 +31,8 @@ public sealed class InstalledVersionInfo
     /// <summary>实例所属的游戏目录。</summary>
     public string GameDirectory { get; init; } = string.Empty;
 
-    /// <summary>界面展示用的标题（优先用实例名）。</summary>
-    public string Display => string.IsNullOrWhiteSpace(DisplayName) ? Id : DisplayName!.Trim();
+    /// <summary>界面展示用的标题：实例目录名就是实例名。</summary>
+    public string Display => Id;
 
     /// <summary>基底游戏版本号。</summary>
     public string VersionText => BaseVersionId ?? Id;
@@ -196,12 +193,12 @@ public sealed class LauncherStack : IDisposable
         var curseForge = new CurseForgeService(
             downloader, resolver, config.ResolveCurseForgeApiKey(), log);
         var modrinth = new ModrinthService(downloader, resolver, log);
-        var instances = new InstanceService(repository, log);
+        var instances = new InstanceService(repository, config, manifests, log);
         var modLoaders = new ModLoaderService(downloader, repository, installer, forgeInstaller, log);
         var resourceDownloads = new ResourceDownloadService(downloader, resolver, log);
         var resourceUpdates = new ResourceUpdateService(curseForge, modrinth, log);
         var gameUpdates = new GameUpdateService(
-            installer, modLoaders, instances, repository, manifests, resources,
+            installer, modLoaders, repository, manifests, resources,
             resourceUpdates, resourceDownloads, log);
 
         return new LauncherStack
@@ -377,14 +374,12 @@ public sealed class LauncherStack : IDisposable
                 merged = leaf;
             }
 
-            var config = Instances.Load(gameRoot, id);
             var baseVersionId = ResolveBaseVersionId(merged, leaf.Id ?? id);
             var (loaderName, loaderVersion, loaderText) = DetectLoaderDetails(merged, leaf.Id ?? id);
 
             result.Add(new InstalledVersionInfo
             {
                 Id = id,
-                DisplayName = config.DisplayName,
                 BaseVersionId = baseVersionId,
                 Type = merged.Type,
                 LoaderName = loaderName,
@@ -809,6 +804,30 @@ public sealed class LauncherStack : IDisposable
 
         RaiseChanged();
         return report;
+    }
+
+    /// <summary>
+    /// 获取指定原版版本的版本 JSON：本地已安装且是原版时直接用，
+    /// 否则从版本清单下载。结果只在内存里使用，不在实例目录留快照。
+    /// </summary>
+    public async Task<GameVersionJson> GetBaseVersionJsonAsync(
+        string versionId,
+        CancellationToken ct = default)
+    {
+        var installed = Repository.TryLoad(GameRoot, versionId);
+        if (installed is { InheritsFrom: null })
+        {
+            installed.Id = versionId;
+            return installed;
+        }
+
+        var entry = await Manifests.FindAsync(versionId, ct).ConfigureAwait(false)
+                    ?? throw new InvalidOperationException($"版本清单里找不到原版 {versionId}");
+
+        var version = await Manifests.GetVersionJsonAsync(entry, ct).ConfigureAwait(false);
+        version.Id = versionId;
+        version.InheritsFrom = null;
+        return version;
     }
 
     /// <summary>

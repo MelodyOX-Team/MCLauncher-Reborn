@@ -64,6 +64,13 @@ internal sealed class LiveTestStack : IDisposable
         var launcher = new GameLauncher(log);
         var authlibAuth = new AuthlibAuthService(downloader, log);
         var authlibInjector = new AuthlibInjectorService(downloader, log);
+        var manifests = new VersionManifestService(downloader, resolver, log, cacheDirectory);
+
+        var config = new ConfigService(
+            new JsonConfigStore(Path.Combine(cacheDirectory, "config"), log),
+            log,
+            includeBuiltInSecrets: false);
+        config.Load();
 
         return new LiveTestStack
         {
@@ -73,7 +80,7 @@ internal sealed class LiveTestStack : IDisposable
             Batch = batch,
             Repository = repository,
             Installer = installer,
-            Manifests = new VersionManifestService(downloader, resolver, log, cacheDirectory),
+            Manifests = manifests,
             Java = java,
             ZuluJava = zuluJava,
             ArgumentBuilder = argumentBuilder,
@@ -81,7 +88,7 @@ internal sealed class LiveTestStack : IDisposable
             LaunchService = new GameLaunchService(
                 repository, installer, java, argumentBuilder, launcher, authlibAuth, authlibInjector, log),
             ModLoaders = new ModLoaderService(downloader, repository, installer, forgeInstaller, log),
-            Instances = new InstanceService(repository, log),
+            Instances = new InstanceService(repository, config, manifests, log),
         };
     }
 

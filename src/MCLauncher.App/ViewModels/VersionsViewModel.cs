@@ -1325,9 +1325,9 @@ public sealed class VersionsViewModel : ViewModelBase
             if (card is null &&
                 (trimmedName.Length == 0 || string.Equals(trimmedName, gameVersion, StringComparison.OrdinalIgnoreCase)))
             {
-                // 不装加载器且名字就是版本号：直接安装到 versions/<版本号>，并登记成显式实例。
+                // 不装加载器且名字就是版本号：直接安装到 versions/<版本号>。
                 InstallStatus = $"正在安装原版 {gameVersion}…";
-                var baseVersion = await FetchBaseVersionAsync(gameVersion!);
+                var baseVersion = await _stack.GetBaseVersionJsonAsync(gameVersion!);
                 var vanillaReport = await _stack.Installer.InstallInstanceAsync(
                     _stack.GameRoot, gameVersion!, baseVersion, null,
                     _stack.BuildInstallOptions(), new Progress<InstallProgress>(ReportInstallProgress));
@@ -1338,7 +1338,6 @@ public sealed class VersionsViewModel : ViewModelBase
                         $"原版 {gameVersion} 安装失败：{vanillaReport.Failed} 个文件未能下载");
                 }
 
-                _stack.Instances.RegisterVersionAsInstance(_stack.GameRoot, gameVersion!);
                 _stack.Config.Settings.SelectedInstanceId = gameVersion;
                 _stack.Config.Save();
                 InstallStatus = $"已安装原版 {gameVersion}，并设为当前实例。";
@@ -1357,7 +1356,7 @@ public sealed class VersionsViewModel : ViewModelBase
                     ? $"正在安装原版 {gameVersion}…"
                     : $"正在安装 {loaderName} {loaderVersion}…";
 
-                var baseVersion = await FetchBaseVersionAsync(gameVersion!);
+                var baseVersion = await _stack.GetBaseVersionJsonAsync(gameVersion!);
                 GameVersionJson? loaderProfile = null;
 
                 try
@@ -1404,13 +1403,8 @@ public sealed class VersionsViewModel : ViewModelBase
                     throw;
                 }
 
-                _stack.Instances.RegisterSelfContainedInstance(
-                    _stack.GameRoot,
-                    instanceId,
-                    gameVersion!,
-                    baseVersion,
-                    card is null ? null : $"{loaderName} {loaderVersion}",
-                    instanceId);
+                // 新实例默认开启版本隔离（mods / 存档 / 配置都放在 instances/<id> 下）。
+                _stack.Instances.SetIsolation(_stack.GameRoot, instanceId, true);
 
                 _stack.Config.Settings.SelectedInstanceId = instanceId;
                 _stack.Config.Save();
@@ -1433,24 +1427,6 @@ public sealed class VersionsViewModel : ViewModelBase
             IsInstalling = false;
             ClearInstallFiles();
         }
-    }
-
-    /// <summary>
-    /// 取原版版本 JSON：本地已安装就直接用，否则从版本清单拉取。
-    /// 这样安装实例前不需要先把原版装进 versions。
-    /// </summary>
-    private async Task<GameVersionJson> FetchBaseVersionAsync(string gameVersion)
-    {
-        var installed = _stack.Repository.TryLoad(_stack.GameRoot, gameVersion);
-        if (installed is { InheritsFrom: null })
-        {
-            return installed;
-        }
-
-        var entry = await _stack.Manifests.FindAsync(gameVersion)
-                    ?? throw new InvalidOperationException($"版本清单里找不到 Minecraft {gameVersion}");
-
-        return await _stack.Manifests.GetVersionJsonAsync(entry);
     }
 
     private void ReportInstallProgress(InstallProgress progress)
@@ -1765,7 +1741,7 @@ public sealed class VersionsViewModel : ViewModelBase
             GameVersionJson? loaderProfile = null;
             string? loaderText = null;
 
-            var baseVersion = await FetchBaseVersionAsync(info.GameVersion!);
+            var baseVersion = await _stack.GetBaseVersionJsonAsync(info.GameVersion!);
 
             try
             {
@@ -1816,8 +1792,8 @@ public sealed class VersionsViewModel : ViewModelBase
                 throw;
             }
 
-            _stack.Instances.RegisterSelfContainedInstance(
-                _stack.GameRoot, instanceId, info.GameVersion!, baseVersion, loaderText, instanceId);
+            // 新实例默认开启版本隔离（mods / 存档 / 配置都放在 instances/<id> 下）。
+            _stack.Instances.SetIsolation(_stack.GameRoot, instanceId, true);
 
             ModpackStatus = "正在铺开整合包文件…";
 

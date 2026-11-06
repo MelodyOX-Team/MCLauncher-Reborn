@@ -52,13 +52,11 @@ public sealed class ForgeInstallerLiveTests
 
         Assert.True(report.Success, GameInstallerLiveTests.Describe(report));
 
-        stack.Instances.RegisterSelfContainedInstance(
-            temp.Path, instanceId, gameVersion, baseVersion, $"Forge {loaderVersion}", instanceId);
-
-        // ---- 磁盘布局：只有一个实例目录 ----
+        // ---- 磁盘布局：只有一个实例目录，且不再生成 .mclauncher 元数据目录 ----
         var versions = Directory.GetDirectories(VersionRepository.VersionsDirectory(temp.Path));
         Assert.Single(versions);
         Assert.Equal(instanceId, Path.GetFileName(versions[0]));
+        Assert.False(Directory.Exists(Path.Combine(versions[0], ".mclauncher")));
 
         Assert.True(File.Exists(VersionRepository.VersionJsonPath(temp.Path, instanceId)));
         Assert.True(File.Exists(VersionRepository.VersionJarPath(temp.Path, instanceId)));

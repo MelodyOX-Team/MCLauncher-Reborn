@@ -68,7 +68,6 @@ public sealed class GameUpdateService
 {
     private readonly GameInstaller _installer;
     private readonly ModLoaderService _modLoaders;
-    private readonly InstanceService _instances;
     private readonly VersionRepository _repository;
     private readonly VersionManifestService _manifests;
     private readonly ResourceRepository _resources;
@@ -79,7 +78,6 @@ public sealed class GameUpdateService
     public GameUpdateService(
         GameInstaller installer,
         ModLoaderService modLoaders,
-        InstanceService instances,
         VersionRepository repository,
         VersionManifestService manifests,
         ResourceRepository resources,
@@ -89,7 +87,6 @@ public sealed class GameUpdateService
     {
         _installer = installer;
         _modLoaders = modLoaders;
-        _instances = instances;
         _repository = repository;
         _manifests = manifests;
         _resources = resources;
@@ -248,12 +245,15 @@ public sealed class GameUpdateService
         var baseVersionId = request.BaseVersionId
                             ?? throw new InvalidOperationException("实例缺少原版版本信息，无法升级加载器。");
 
-        var baseVersion = _instances.TryLoadBaseVersion(request.GameRoot, request.InstanceId, baseVersionId);
+        // 本地已安装的原版 JSON 优先；没有时从版本清单获取（只在内存里使用，不留快照）。
+        var baseVersion = _repository.TryLoad(request.GameRoot, baseVersionId);
+        if (baseVersion is { InheritsFrom: not null })
+        {
+            baseVersion = null;
+        }
 
         if (baseVersion is null)
         {
-            // 从别处导入的实例没有原版版本文件：从版本清单取一份官方 JSON 补上，
-            // 并留作实例的原版快照，之后卸载/再次升级都不用再联网。
             progress?.Report(new InstallProgress
             {
                 Stage = $"正在获取原版 {baseVersionId} 的版本信息",
@@ -267,7 +267,7 @@ public sealed class GameUpdateService
 
             baseVersion = await _manifests.GetVersionJsonAsync(entry, ct).ConfigureAwait(false);
             baseVersion.Id = baseVersionId;
-            _instances.SaveVanillaSnapshot(request.GameRoot, request.InstanceId, baseVersion);
+            baseVersion.InheritsFrom = null;
         }
 
         var display = ModLoaderService.DisplayName(kind);
@@ -304,8 +304,6 @@ public sealed class GameUpdateService
                 $"加载器已写入，但依赖文件下载失败（{report.Failed} 个）");
         }
 
-        _instances.SetLoaderDescription(
-            request.GameRoot, request.InstanceId, $"{display} {targetVersion}");
         _log.Info($"实例 {request.InstanceId} 的加载器已原地升级到 {display} {targetVersion}");
     }
 
