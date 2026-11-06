@@ -469,10 +469,22 @@
                                     <ComboBox Grid.Column="1" Width="220" Height="28" FontSize="13"
                                               ItemsSource="{Binding MinecraftVersions}"
                                               SelectedItem="{Binding SelectedMinecraftVersion, Mode=TwoWay}"/>
-                                    <CheckBox Grid.Column="2" Content="显示快照" FontSize="12"
-                                              Foreground="#1A1A1A" Margin="12,0,0,0"
+                                    <CheckBox Grid.Column="2" Content="正式版" FontSize="12"
+                                              Foreground="#1A1A1A" Margin="12,0,4,0"
+                                              VerticalAlignment="Center"
+                                              IsChecked="{Binding IncludeReleases, Mode=TwoWay}"/>
+                                    <CheckBox Grid.Column="2" Content="快照版" FontSize="12"
+                                              Foreground="#1A1A1A" Margin="4,0,4,0"
                                               VerticalAlignment="Center"
                                               IsChecked="{Binding IncludeSnapshots, Mode=TwoWay}"/>
+                                    <CheckBox Grid.Column="2" Content="愚人节" FontSize="12"
+                                              Foreground="#1A1A1A" Margin="4,0,4,0"
+                                              VerticalAlignment="Center"
+                                              IsChecked="{Binding IncludeAprilFools, Mode=TwoWay}"/>
+                                    <CheckBox Grid.Column="2" Content="远古版" FontSize="12"
+                                              Foreground="#1A1A1A" Margin="4,0,0,0"
+                                              VerticalAlignment="Center"
+                                              IsChecked="{Binding IncludeOldVersions, Mode=TwoWay}"/>
                                 </Grid>
 
                                 <TextBlock Text="模组加载器（可选）" FontSize="12" Foreground="#7A7A7A"

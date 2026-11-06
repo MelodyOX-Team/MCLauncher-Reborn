@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using MCLauncher.Core.Connect;
 using MCLauncher.Core.Logging;
 using MCLauncher.Core.Models;
@@ -347,21 +348,45 @@ public sealed class LauncherStack : IDisposable
 
         foreach (var id in Instances.ListVisibleInstanceIds(gameRoot))
         {
-            var json = Repository.TryLoad(gameRoot, id);
-            if (json is null)
+            // 先拿 leaf JSON；如果版本文件损坏直接跳过。
+            var leaf = Repository.TryLoad(gameRoot, id);
+            if (leaf is null)
             {
                 continue;
             }
 
+            // 合并继承链得到自洽的 merged JSON（含 arguments / libraries 的完整叠加），
+            // 同时拿到 chain 的最后一层——原版 JSON——它的 id 是原版版本号候选。
+            GameVersionJson merged;
+            string? vanillaIdFromChain = null;
+            try
+            {
+                merged = Repository.Resolve(gameRoot, id);
+                vanillaIdFromChain = merged.InheritsFrom is null && merged.Id is { Length: > 0 }
+                    ? merged.Id  // 自洽实例：merged.Id 是 leaf id，没有 inheritsFrom，原版版本号藏在 arguments/libraries/chain 末尾 JSON 里
+                    : null;
+
+                // Resolve 内部 BuildChain 返回的 chain 顺序是 leaf → root，取最后一个 JSON 的 Id
+                // （root 通常是原版，自洽实例除外：自洽实例 chain 长度为 1，leaf 就是自洽版本）
+                // 我们这里不用再调用 BuildChain 了——改用 FlattenGameArgs 直接扫 merged 的 arguments。
+                _ = vanillaIdFromChain; // 占位，ResolveBaseVersionId 会从 chain 最后一层推断
+            }
+            catch (InvalidDataException)
+            {
+                // 继承链坏了（父版本不存在），退化为只扫 leaf
+                merged = leaf;
+            }
+
             var config = Instances.Load(gameRoot, id);
-            var (loaderName, loaderVersion, loaderText) = DetectLoaderDetails(json, id, config);
+            var baseVersionId = ResolveBaseVersionId(merged, leaf.Id ?? id);
+            var (loaderName, loaderVersion, loaderText) = DetectLoaderDetails(merged, leaf.Id ?? id);
 
             result.Add(new InstalledVersionInfo
             {
                 Id = id,
                 DisplayName = config.DisplayName,
-                BaseVersionId = ResolveBaseVersionId(gameRoot, json, config, id),
-                Type = json.Type,
+                BaseVersionId = baseVersionId,
+                Type = merged.Type,
                 LoaderName = loaderName,
                 LoaderVersion = loaderVersion,
                 LoaderText = loaderText,
@@ -385,26 +410,316 @@ public sealed class LauncherStack : IDisposable
     }
 
     /// <summary>
-    /// 解析实例对应的原版版本：继承字段 → 实例配置 → 原版快照 → 客户端 jar 里的 version.json。
-    /// 都没有时返回 null（极老的客户端 jar 不带这份元数据），不要退回实例 id。
+    /// 从一个（已经合并好继承链的）版本 JSON 里推断它对应的原版版本号。
+    /// 不读 instance.json、不读 vanilla.json、不再扫客户端 jar。
+    /// 找不到时返回 null，绝不退回用版本 id。
     /// </summary>
-    private string? ResolveBaseVersionId(
-        string gameRoot, GameVersionJson json, InstanceConfig config, string id)
+    private string? ResolveBaseVersionId(GameVersionJson merged, string leafId)
     {
-        if (!string.IsNullOrWhiteSpace(json.InheritsFrom))
+        // 1. arguments 里的 --fml.mcVersion（Forge/NeoForge 最常用）
+        var args = FlattenGameArgs(merged);
+        var fmlMc = TryGetFlagArg(args, "--fml.mcVersion");
+        if (!string.IsNullOrWhiteSpace(fmlMc))
         {
-            return json.InheritsFrom.Trim();
+            return fmlMc.Trim();
         }
 
-        if (!string.IsNullOrWhiteSpace(config.GameVersion))
+        // 2. clientVersion 字段（Fabric/Quilt 版本 JSON 有时直接塞）
+        if (!string.IsNullOrWhiteSpace(merged.ClientVersion))
         {
-            return config.GameVersion.Trim();
+            return merged.ClientVersion!.Trim();
         }
 
-        var vanilla = Instances.ReadVanillaVersionId(gameRoot, id);
-        return !string.IsNullOrWhiteSpace(vanilla)
-            ? vanilla
-            : Instances.ReadJarGameVersion(gameRoot, json.Jar ?? id);
+        // 3. 如果 merged 里完全没有加载器痕迹（arguments 和 libraries 都扫不到），
+        // 那它本身就是一个原版版本，Id 就是原版版本号。
+        //    注意：原版 JSON 的 libraries 里不会有 net.fabricmc / net.minecraftforge 这些加载器坐标，
+        //    arguments 里也不会有 --fml.* 这种 flag。
+        var hasLoader = HasLoaderMarker(args, merged.Libraries);
+        if (!hasLoader && !string.IsNullOrWhiteSpace(merged.Id))
+        {
+            return merged.Id!.Trim();
+        }
+
+        // 4. libraries 里 Fabric intermediary / Quilt hashed / NeoForge / Forge 坐标
+        foreach (var library in merged.Libraries ?? new List<Library>())
+        {
+            var parts = (library.Name ?? string.Empty).Split(':');
+            if (parts.Length < 3) continue;
+            var (group, artifact, version) = (parts[0], parts[1], parts[2]);
+
+            if (group == "net.fabricmc" && artifact == "intermediary" && !string.IsNullOrWhiteSpace(version))
+            {
+                return version.Trim();
+            }
+
+            if (group == "org.quiltmc" && artifact == "hashed" && !string.IsNullOrWhiteSpace(version))
+            {
+                return version.Trim();
+            }
+
+            if (group == "net.neoforged" && artifact == "neoforge" && !string.IsNullOrWhiteSpace(version))
+            {
+                var dash = version.IndexOf('-', StringComparison.Ordinal);
+                if (dash >= 0) return version[(dash + 1)..].Trim();
+                return version.Trim();
+            }
+
+            if (group == "net.minecraftforge" && artifact == "forge" && !string.IsNullOrWhiteSpace(version))
+            {
+                var dash = version.IndexOf('-', StringComparison.Ordinal);
+                if (dash >= 0 && dash < version.Length - 1)
+                {
+                    var suffix = version[(dash + 1)..].Trim();
+                    if (!string.IsNullOrWhiteSpace(suffix))
+                    {
+                        return suffix;
+                    }
+                }
+            }
+        }
+
+        // 5. 最后兜底：极老导入实例（没有继承、没有 arguments、libraries 也扫不到加载器），
+        // 退回读客户端 jar 内嵌 version.json。
+        if (!string.IsNullOrWhiteSpace(leafId))
+        {
+            var vanilla = Instances.ReadJarGameVersion(GameRoot, leafId);
+            if (!string.IsNullOrWhiteSpace(vanilla))
+            {
+                return vanilla;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// 判断一个合并后的版本 JSON 里是否存在加载器痕迹：
+    /// arguments 里有 --fml.* flag，或 libraries 里有 Fabric/Forge/NeoForge/Quilt/Cleanroom/LiteLoader/OptiFine 坐标。
+    /// 原版版本应返回 false。
+    /// </summary>
+    private static bool HasLoaderMarker(IReadOnlyList<string> args, List<Library>? libraries)
+    {
+        // arguments 里的 Forge/NeoForge flag
+        foreach (var a in args)
+        {
+            if (a == "--fml.forgeVersion" || a == "--fml.neoForgeVersion" || a == "--fml.mcVersion")
+            {
+                return true;
+            }
+        }
+
+        if (libraries is null) return false;
+
+        foreach (var library in libraries)
+        {
+            var name = library.Name ?? string.Empty;
+            var lower = name.ToLowerInvariant();
+
+            if (lower.Contains("fabric-loader")
+                || lower.Contains("quilt-loader")
+                || lower.Contains("neoforged")
+                || lower.Contains("minecraftforge")
+                || lower.Contains("cleanroommc")
+                || lower.Contains("liteloader")
+                || (lower.Contains("optifine") && !lower.Contains("launchwrapper"))
+                || lower.Contains("cpw.mods"))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// 从一个（已经合并好继承链的）版本 JSON 里识别加载器类型和版本号。
+    /// 读取顺序：arguments → libraries → mainClass → 版本 id 猜测。
+    /// </summary>
+    private static (string Name, string? Version, string? Text) DetectLoaderDetails(
+        GameVersionJson merged, string leafId)
+    {
+        var args = FlattenGameArgs(merged);
+
+        // ---- arguments 优先（Forge/NeoForge 的独立 JSON 最靠谱）----
+
+        // NeoForge：先于 Forge 检测（因为 NeoForge 里也含 minecraftforge 坐标）
+        var neoForgeArg = TryGetFlagArg(args, "--fml.neoForgeVersion");
+        if (!string.IsNullOrWhiteSpace(neoForgeArg))
+        {
+            return ("NeoForge", neoForgeArg.Trim(), Describe("NeoForge", neoForgeArg.Trim()));
+        }
+
+        // Forge
+        var forgeArg = TryGetFlagArg(args, "--fml.forgeVersion");
+        if (!string.IsNullOrWhiteSpace(forgeArg))
+        {
+            return ("Forge", forgeArg.Trim(), Describe("Forge", forgeArg.Trim()));
+        }
+
+        // ---- arguments 里没有，扫 libraries ----
+
+        foreach (var library in merged.Libraries ?? new List<Library>())
+        {
+            var parts = (library.Name ?? string.Empty).Split(':');
+            if (parts.Length < 3) continue;
+            var (group, artifact, version) = (parts[0], parts[1], parts[2]);
+            version = version.Trim();
+
+            // NeoForge：net.neoforged:neoforge 或 net.neoforged.fancymodloader:loader
+            if ((group == "net.neoforged" && artifact == "neoforge")
+                || (group == "net.neoforged.fancymodloader" && (artifact == "loader" || artifact == "core")))
+            {
+                return ("NeoForge", version, Describe("NeoForge", version));
+            }
+
+            // Forge：net.minecraftforge:forge 或 net.minecraftforge:fmlloader
+            // 注意排除同 group 下的 NeoForge 库（理论上自洽实例里不会两者共存）
+            if ((group == "net.minecraftforge" && (artifact == "forge" || artifact == "fmlloader"))
+                || (group == "cpw.mods" && artifact == "forge"))
+            {
+                return ("Forge", version, Describe("Forge", version));
+            }
+
+            // Fabric：net.fabricmc:fabric-loader（不是 net.legacyfabric 的才算 Fabric）
+            if (group == "net.fabricmc" && artifact == "fabric-loader")
+            {
+                return ("Fabric", version, Describe("Fabric", version));
+            }
+
+            // Quilt：org.quiltmc:quilt-loader
+            if (group == "org.quiltmc" && artifact == "quilt-loader")
+            {
+                return ("Quilt", version, Describe("Quilt", version));
+            }
+
+            // Cleanroom：com.cleanroommc:cleanroom
+            if (group == "com.cleanroommc" && artifact == "cleanroom")
+            {
+                return ("Cleanroom", version, Describe("Cleanroom", version));
+            }
+
+            // LiteLoader：com.mumfrey:liteloader
+            if (group == "com.mumfrey" && artifact == "liteloader")
+            {
+                return ("LiteLoader", version, Describe("LiteLoader", version));
+            }
+
+            // OptiFine：net.optifine:* 或 optifine:*，排除 launchwrapper
+            if ((group == "net.optifine" || group == "optifine")
+                && !artifact.Contains("launchwrapper", StringComparison.OrdinalIgnoreCase))
+            {
+                return ("OptiFine", version, Describe("OptiFine", version));
+            }
+        }
+
+        // ---- mainClass 关键字兜底 ----
+
+        var mainClass = (merged.MainClass ?? string.Empty).ToLowerInvariant();
+        if (mainClass.Contains("neoforged")) return ("NeoForge", null, "NeoForge");
+        if (mainClass.Contains("minecraftforge")) return ("Forge", null, "Forge");
+        if (mainClass.Contains("fabricmc")) return ("Fabric", null, "Fabric");
+        if (mainClass.Contains("quiltmc")) return ("Quilt", null, "Quilt");
+
+        // ---- 最后：版本 id 正则猜测 ----
+
+        var kind = DetectLoader(leafId);
+        if (kind == "原版")
+        {
+            return ("原版", null, null);
+        }
+
+        var guessed = GuessLoaderVersionFromId(leafId, kind);
+        return (kind, guessed, Describe(kind, guessed));
+    }
+
+    /// <summary>
+    /// 把一个版本 JSON 的所有 game arguments（包括 legacy minecraftArguments 和结构化 arguments.game）
+    /// 展开成一个纯字符串列表，用于扫 flag 如 --fml.forgeVersion。
+    /// rule-based 参数里当前环境不命中的会跳过。
+    /// </summary>
+    private static List<string> FlattenGameArgs(GameVersionJson json)
+    {
+        var args = new List<string>();
+
+        if (json.Arguments?.Game is { Count: > 0 })
+        {
+            foreach (var entry in json.Arguments.Game)
+            {
+                if (!entry.Applies()) continue;
+                args.AddRange(entry.Values.Where(v => !string.IsNullOrWhiteSpace(v)));
+            }
+        }
+
+        // legacy minecraftArguments 是一行空格分隔字符串
+        if (!string.IsNullOrWhiteSpace(json.MinecraftArguments))
+        {
+            // 拆分时保留双引号括起来的整个片段（模拟 shell 行为）
+            var legacy = SplitShellLike(json.MinecraftArguments);
+            args.AddRange(legacy);
+        }
+
+        return args;
+    }
+
+    /// <summary>
+    /// 在一个字符串参数列表里找 flag 值。支持两种写法：
+    /// <c>--flag value</c> 和 <c>--flag=value</c>。
+    /// </summary>
+    private static string? TryGetFlagArg(IReadOnlyList<string> args, string flag)
+    {
+        for (int i = 0; i < args.Count; i++)
+        {
+            var a = args[i];
+            if (string.Equals(a, flag, StringComparison.Ordinal))
+            {
+                if (i + 1 < args.Count && !args[i + 1].StartsWith('-'))
+                {
+                    return args[i + 1];
+                }
+
+                continue;
+            }
+
+            if (a.StartsWith(flag + "=", StringComparison.Ordinal))
+            {
+                return a[(flag.Length + 1)..];
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>按 shell 行为拆分：空格分隔，但双引号内的空格当作整体。</summary>
+    private static IEnumerable<string> SplitShellLike(string input)
+    {
+        var current = new StringBuilder();
+        var inQuotes = false;
+        foreach (var ch in input)
+        {
+            if (ch == '"')
+            {
+                inQuotes = !inQuotes;
+                continue;
+            }
+
+            if (char.IsWhiteSpace(ch) && !inQuotes)
+            {
+                if (current.Length > 0)
+                {
+                    yield return current.ToString();
+                    current.Clear();
+                }
+
+                continue;
+            }
+
+            current.Append(ch);
+        }
+
+        if (current.Length > 0)
+        {
+            yield return current.ToString();
+        }
     }
 
     /// <summary>从版本 id 推断加载器类型（仅用于界面展示，不影响安装/启动逻辑）。</summary>
@@ -413,105 +728,18 @@ public sealed class LauncherStack : IDisposable
         var id = versionId.ToLowerInvariant();
 
         // 顺序不能反：neoforge-21.1.0 里也含 "forge-"。
-        if (id.Contains("neoforge"))
-        {
-            return "NeoForge";
-        }
-
-        if (id.Contains("-forge") || id.Contains("forge-"))
-        {
-            return "Forge";
-        }
-
-        if (id.Contains("quilt"))
-        {
-            return "Quilt";
-        }
-
-        if (id.Contains("fabric"))
-        {
-            return "Fabric";
-        }
-
-        if (id.Contains("optifine"))
-        {
-            return "OptiFine";
-        }
-
-        if (id.Contains("liteloader"))
-        {
-            return "LiteLoader";
-        }
+        if (id.Contains("neoforge")) return "NeoForge";
+        if (id.Contains("-forge") || id.Contains("forge-")) return "Forge";
+        if (id.Contains("quilt")) return "Quilt";
+        if (id.Contains("fabric")) return "Fabric";
+        if (id.Contains("optifine")) return "OptiFine";
+        if (id.Contains("liteloader")) return "LiteLoader";
 
         return "原版";
     }
 
-    /// <summary>加载器展示信息：优先用实例配置里的记录，其次从库坐标推断，最后按版本 id 猜。</summary>
-    private static (string Name, string? Version, string? Text) DetectLoaderDetails(
-        GameVersionJson json, string versionId, InstanceConfig config)
-    {
-        var saved = config.Loaders.LastOrDefault();
-        if (!string.IsNullOrWhiteSpace(saved))
-        {
-            var parsed = ModLoaderService.ParseLoaderDescription(saved);
-            return parsed is { } p
-                ? (ModLoaderService.DisplayName(p.Kind), p.Version, saved)
-                : (saved!, null, saved);
-        }
-
-        foreach (var library in json.Libraries ?? new List<Library>())
-        {
-            var coordinates = library.Name ?? string.Empty;
-            var lower = coordinates.ToLowerInvariant();
-            var version = coordinates.Split(':').ElementAtOrDefault(2);
-            version = StripGamePrefix(version, json.InheritsFrom);
-
-            if (lower.Contains("fabric-loader"))
-            {
-                return ("Fabric", version, Describe("Fabric", version));
-            }
-
-            if (lower.Contains("quilt-loader"))
-            {
-                return ("Quilt", version, Describe("Quilt", version));
-            }
-
-            if (lower.Contains("neoforge"))
-            {
-                return ("NeoForge", version, Describe("NeoForge", version));
-            }
-
-            if (lower.Contains("minecraftforge:forge") || lower.Contains("minecraftforge:fmlloader"))
-            {
-                return ("Forge", version, Describe("Forge", version));
-            }
-        }
-
-        var kind = DetectLoader(versionId);
-        if (kind == "原版")
-        {
-            return ("原版", null, null);
-        }
-
-        var guessed = GuessLoaderVersionFromId(versionId, kind);
-        return (kind, guessed, Describe(kind, guessed));
-    }
-
     private static string Describe(string kind, string? version) =>
         string.IsNullOrWhiteSpace(version) ? kind : $"{kind} {version}";
-
-    private static string? StripGamePrefix(string? version, string? baseVersion)
-    {
-        if (string.IsNullOrWhiteSpace(version) || string.IsNullOrWhiteSpace(baseVersion))
-        {
-            return version;
-        }
-
-        var prefix = baseVersion + "-";
-        return version.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
-            ? version[prefix.Length..]
-            : version;
-    }
 
     private static string? GuessLoaderVersionFromId(string versionId, string kind)
     {
@@ -536,11 +764,7 @@ public sealed class LauncherStack : IDisposable
     private static string? SliceBetween(string text, string marker, string terminator)
     {
         var after = SliceAfter(text, marker);
-        if (after is null)
-        {
-            return null;
-        }
-
+        if (after is null) return null;
         var end = after.IndexOf(terminator, StringComparison.Ordinal);
         return end < 0 ? after : after[..end];
     }

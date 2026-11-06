@@ -94,6 +94,13 @@ public sealed class GameVersionJson
     [JsonPropertyName("inheritsFrom")]
     public string? InheritsFrom { get; set; }
 
+    /// <summary>
+    /// Fabric / Quilt 等第三方版本 JSON 有时直接塞原版版本号，
+    /// 比如 <c>"clientVersion": "1.21.3"</c>。优先级高于 libraries 坐标解析。
+    /// </summary>
+    [JsonPropertyName("clientVersion")]
+    public string? ClientVersion { get; set; }
+
     /// <summary>要用的客户端 jar 版本号；缺失时等同于 <see cref="Id"/>（旧版 Forge 依赖它）。</summary>
     [JsonPropertyName("jar")]
     public string? Jar { get; set; }

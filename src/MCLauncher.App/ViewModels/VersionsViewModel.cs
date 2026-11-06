@@ -169,7 +169,10 @@ public sealed class VersionsViewModel : ViewModelBase
     private bool _instanceNameTouched;
     private bool _suppressNameTouch;
     private string? _selectedMinecraftVersion;
+    private bool _includeReleases = true;
     private bool _includeSnapshots;
+    private bool _includeAprilFools;
+    private bool _includeOldVersions;
     private LoaderCardItem? _selectedLoaderCard;
     private LoaderVersionOption? _selectedLoaderVersion;
     private string _installStatus = string.Empty;
@@ -424,15 +427,39 @@ public sealed class VersionsViewModel : ViewModelBase
         }
     }
 
+    public bool IncludeReleases
+    {
+        get => _includeReleases;
+        set
+        {
+            if (SetProperty(ref _includeReleases, value)) BuildMinecraftVersionList();
+        }
+    }
+
     public bool IncludeSnapshots
     {
         get => _includeSnapshots;
         set
         {
-            if (SetProperty(ref _includeSnapshots, value))
-            {
-                BuildMinecraftVersionList();
-            }
+            if (SetProperty(ref _includeSnapshots, value)) BuildMinecraftVersionList();
+        }
+    }
+
+    public bool IncludeAprilFools
+    {
+        get => _includeAprilFools;
+        set
+        {
+            if (SetProperty(ref _includeAprilFools, value)) BuildMinecraftVersionList();
+        }
+    }
+
+    public bool IncludeOldVersions
+    {
+        get => _includeOldVersions;
+        set
+        {
+            if (SetProperty(ref _includeOldVersions, value)) BuildMinecraftVersionList();
         }
     }
 
@@ -1103,11 +1130,18 @@ public sealed class VersionsViewModel : ViewModelBase
         MinecraftVersions.Clear();
         foreach (var entry in _allVersions)
         {
-            var type = entry.Type ?? "release";
-            if (type != "release" && !(IncludeSnapshots && type == "snapshot"))
+            var include = entry switch
             {
-                continue;
-            }
+                { IsRelease: true } => IncludeReleases,
+                { IsSnapshot: true, IsAprilFools: true } => IncludeAprilFools,
+                { IsSnapshot: true } => IncludeSnapshots,
+                { IsOld: true } => IncludeOldVersions,
+                // old_snapshot 是 Minecraft 后来加入的类型（如愚人节之后单独存档），
+                // 但它的条目一般也会匹配 IsSnapshot=false、IsOld=true——已经被上面覆盖。
+                _ => IncludeOldVersions,
+            };
+
+            if (!include) continue;
 
             MinecraftVersions.Add(entry.Id);
         }

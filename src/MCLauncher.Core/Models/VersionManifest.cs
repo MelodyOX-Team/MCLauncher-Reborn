@@ -54,7 +54,26 @@ public sealed class VersionManifestEntry
     public bool IsSnapshot => string.Equals(Type, "snapshot", StringComparison.OrdinalIgnoreCase);
 
     [JsonIgnore]
-    public bool IsOld => Type is "old_beta" or "old_alpha";
+    public bool IsOld => Type is "old_beta" or "old_alpha" or "old_snapshot";
+
+    /// <summary>
+    /// 愚人节版本：社区公认的那批带彩蛋的版本。清单里 type 通常是 snapshot / old_snapshot，
+    /// 但 id 能区分。这里维护一张名单，缺了也不影响——用户可以通过快照分区里看到它们。
+    /// </summary>
+    [JsonIgnore]
+    public bool IsAprilFools => KnownAprilFoolsIds.Contains(Id)
+                                || Id.Contains("April Fools", StringComparison.OrdinalIgnoreCase)
+                                || Id.Contains("aprilfools", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>社区公认的愚人节版本 id。</summary>
+    private static readonly HashSet<string> KnownAprilFoolsIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "20w14infinite",            // 2020 无限愚人节
+        "3D Shareware v1.34",       // 2019 年愚人节
+        "23w13a_or_b",              // 2023 投票愚人节
+        "1.RV-Pre1",                // 2018 愚人节
+        "3D_Shareware_v1.34",
+    };
 
     public override string ToString() => $"{Id} ({Type})";
 }

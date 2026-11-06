@@ -85,6 +85,7 @@ public sealed class VersionResolver
     {
         Id = child.Id ?? parent.Id,
         InheritsFrom = null,
+        ClientVersion = child.ClientVersion ?? parent.ClientVersion,
         Jar = child.Jar ?? parent.Jar,
         MainClass = child.MainClass ?? parent.MainClass,
         Type = child.Type ?? parent.Type,
