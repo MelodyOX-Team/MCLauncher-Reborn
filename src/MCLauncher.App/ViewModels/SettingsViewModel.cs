@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.RegularExpressions;
 using System.Windows.Input;
+using System.Windows.Threading;
 using MCLauncher.App.ViewModels.Mvvm;
 using MCLauncher.Core.Models;
 using MCLauncher.Core.Network;
@@ -53,6 +54,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
     private readonly LauncherStack _stack;
     private readonly AsyncRelayCommand _detectJavaCommand;
+    private readonly DispatcherTimer _backgroundApplyTimer;
 
     private string _statusText = "修改后点「保存设置」生效";
     private bool _isBusy;
@@ -61,6 +63,11 @@ public sealed class SettingsViewModel : ViewModelBase
     public SettingsViewModel(LauncherStack stack)
     {
         _stack = stack;
+
+        // 背景图文本输入防抖：输入框是逐字符触发，网络模式边打边下会刷出大量无效请求，
+        // 停止输入 600ms 后才应用一次。
+        _backgroundApplyTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(600) };
+        _backgroundApplyTimer.Tick += OnBackgroundApplyTimerTick;
 
         SaveCommand = new RelayCommand(Save);
         BrowseGameFolderCommand = new RelayCommand(BrowseGameFolder);
@@ -300,7 +307,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
             _stack.Config.Settings.BackgroundCustomPath = normalized;
             OnPropertyChanged();
-            _backgroundDirty = true;
+            ScheduleBackgroundApply();
         }
     }
 
@@ -317,7 +324,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
             _stack.Config.Settings.BackgroundUrl = normalized;
             OnPropertyChanged();
-            _backgroundDirty = true;
+            ScheduleBackgroundApply();
         }
     }
 
@@ -332,6 +339,32 @@ public sealed class SettingsViewModel : ViewModelBase
     /// <summary>背景已重新应用（或已随保存落盘）后清除脏标记。</summary>
     public void ClearBackgroundDirty() => _backgroundDirty = false;
 
+    /// <summary>模式/路径等即时修改：立刻重新应用窗口背景。</summary>
+    private void ApplyBackgroundNow()
+    {
+        _backgroundApplyTimer.Stop();
+        App.RefreshBackground();
+        _backgroundDirty = false;
+    }
+
+    /// <summary>文本输入：防抖后应用，避免逐字符触发（网络模式会重复下载）。</summary>
+    private void ScheduleBackgroundApply()
+    {
+        _backgroundDirty = true;
+        _backgroundApplyTimer.Stop();
+        _backgroundApplyTimer.Start();
+    }
+
+    private void OnBackgroundApplyTimerTick(object? sender, EventArgs e)
+    {
+        _backgroundApplyTimer.Stop();
+        if (_backgroundDirty)
+        {
+            App.RefreshBackground();
+            _backgroundDirty = false;
+        }
+    }
+
     private void SetBackgroundMode(BackgroundMode mode)
     {
         var settings = _stack.Config.Settings;
@@ -342,12 +375,14 @@ public sealed class SettingsViewModel : ViewModelBase
 
         settings.BackgroundMode = mode;
         settings.BackgroundModeConfigured = true;
-        _backgroundDirty = true;
 
         if (mode == BackgroundMode.Folder)
         {
             BackgroundPicker.EnsureFolder(AppContext.BaseDirectory, _stack.Log);
         }
+
+        // 默认底图 / 目录模式：点一下单选就立即换背景。
+        ApplyBackgroundNow();
 
         OnPropertyChanged(nameof(IsBackgroundDefault));
         OnPropertyChanged(nameof(IsBackgroundFolder));
@@ -896,6 +931,7 @@ public sealed class SettingsViewModel : ViewModelBase
     private void Save()
     {
         var saved = _stack.Config.Save();
+        _backgroundApplyTimer.Stop();
         App.RefreshBackground();
         ClearBackgroundDirty();
 
