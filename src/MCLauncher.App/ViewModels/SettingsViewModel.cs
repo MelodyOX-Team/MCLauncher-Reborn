@@ -300,6 +300,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
             _stack.Config.Settings.BackgroundCustomPath = normalized;
             OnPropertyChanged();
+            _backgroundDirty = true;
         }
     }
 
@@ -316,8 +317,20 @@ public sealed class SettingsViewModel : ViewModelBase
 
             _stack.Config.Settings.BackgroundUrl = normalized;
             OnPropertyChanged();
+            _backgroundDirty = true;
         }
     }
+
+    private bool _backgroundDirty;
+
+    /// <summary>
+    /// 背景图设置是否被改过：离开设置页时据此刷新窗口背景，
+    /// 避免每次切页都重设背景（网络模式会触发一次下载）。
+    /// </summary>
+    public bool IsBackgroundDirty => _backgroundDirty;
+
+    /// <summary>背景已重新应用（或已随保存落盘）后清除脏标记。</summary>
+    public void ClearBackgroundDirty() => _backgroundDirty = false;
 
     private void SetBackgroundMode(BackgroundMode mode)
     {
@@ -329,6 +342,7 @@ public sealed class SettingsViewModel : ViewModelBase
 
         settings.BackgroundMode = mode;
         settings.BackgroundModeConfigured = true;
+        _backgroundDirty = true;
 
         if (mode == BackgroundMode.Folder)
         {
@@ -883,6 +897,7 @@ public sealed class SettingsViewModel : ViewModelBase
     {
         var saved = _stack.Config.Save();
         App.RefreshBackground();
+        ClearBackgroundDirty();
 
         if (!saved)
         {

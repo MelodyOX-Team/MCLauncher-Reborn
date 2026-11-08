@@ -358,6 +358,8 @@ public sealed class ShellViewModel : ViewModelBase
     /// </summary>
     public void NavigateToPage(string pageId, string title)
     {
+        RefreshBackgroundIfLeavingSettings();
+
         if (!_pageCache.TryGetValue(pageId, out var page))
         {
             page = _pageFactory(pageId);
@@ -376,6 +378,8 @@ public sealed class ShellViewModel : ViewModelBase
 
     private void Navigate(NavItem item)
     {
+        RefreshBackgroundIfLeavingSettings();
+
         if (!_pageCache.TryGetValue(item.Id, out var page))
         {
             page = _pageFactory(item.Id);
@@ -384,5 +388,20 @@ public sealed class ShellViewModel : ViewModelBase
 
         CurrentPage = page;
         StatusText = item.Title;
+    }
+
+    /// <summary>
+    /// 离开设置页时，如果改过背景图设置就立即重新应用窗口背景，不用等保存或重启。
+    /// </summary>
+    private void RefreshBackgroundIfLeavingSettings()
+    {
+        if (_currentPage is not SettingsViewModel settings || !settings.IsBackgroundDirty)
+        {
+            return;
+        }
+
+        App.RefreshBackground();
+        settings.ClearBackgroundDirty();
+        Debug.WriteLine("背景图设置已修改，离开设置页时已立即应用");
     }
 }
