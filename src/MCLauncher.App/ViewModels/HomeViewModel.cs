@@ -409,7 +409,7 @@ public sealed class HomeViewModel : ViewModelBase
         var account = _stack.Accounts.Selected;
         AccountName = account?.Name ?? "未选择账号";
         AccountTypeText = account is null
-            ? "启动时自动创建离线账号"
+            ? "启动时自动创建账号"
             : account.IsMicrosoft ? "微软账户"
             : account.IsExternal ? "外置登录"
             : "离线模式";
