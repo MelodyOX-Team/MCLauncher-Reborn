@@ -805,6 +805,14 @@ public sealed class InstanceManageViewModel : ViewModelBase
         catch (Exception ex)
         {
             _stack.Log.Error($"扫描实例资源失败：{directory}", ex);
+            if (scan != _scanVersion)
+            {
+                return;
+            }
+
+            // 扫描失败时清空列表：否则从别的页签切过来，界面上会残留上一个页签的资源。
+            _allResources = Array.Empty<LocalResource>();
+            ApplyFilter();
             StatusText = "扫描失败：" + ex.Message;
         }
         finally

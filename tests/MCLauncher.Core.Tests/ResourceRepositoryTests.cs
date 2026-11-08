@@ -125,6 +125,25 @@ public sealed class ResourceRepositoryTests
     }
 
     [Fact]
+    public void 读取真实结构的level_dat()
+    {
+        using var temp = new TempDirectory();
+        var repository = Create(out _);
+        var saves = ResourceRepository.GetDirectory(temp.Path, ResourceKind.World);
+        var world = Path.Combine(saves, "world");
+        Directory.CreateDirectory(world);
+
+        // LevelName 前面有大量其他类型标签，读取时必须逐个跳过；
+        // gzip 流不支持 Seek，跳过逻辑只能分块读出来丢弃。
+        ZipBuilder.WriteLevelDatWithPayload(Path.Combine(world, "level.dat"), "复杂生存档", "1.21.1");
+
+        var resource = Assert.Single(repository.Scan(temp.Path, ResourceKind.World));
+
+        Assert.Equal("复杂生存档", resource.DisplayName);
+        Assert.Equal("1.21.1", resource.GameVersion);
+    }
+
+    [Fact]
     public void 扫描资源包并读出pack_mcmeta()
     {
         using var temp = new TempDirectory();

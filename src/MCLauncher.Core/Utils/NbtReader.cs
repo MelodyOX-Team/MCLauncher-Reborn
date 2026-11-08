@@ -136,17 +136,17 @@ public static class NbtReader
                 return true;
 
             case TagShort:
-                reader.BaseStream.Seek(2, SeekOrigin.Current);
+                DiscardBytes(reader, 2);
                 return true;
 
             case TagInt:
             case TagFloat:
-                reader.BaseStream.Seek(4, SeekOrigin.Current);
+                DiscardBytes(reader, 4);
                 return true;
 
             case TagLong:
             case TagDouble:
-                reader.BaseStream.Seek(8, SeekOrigin.Current);
+                DiscardBytes(reader, 8);
                 return true;
 
             case TagByteArray:
@@ -157,7 +157,7 @@ public static class NbtReader
                         return false;
                     }
 
-                    reader.BaseStream.Seek(length, SeekOrigin.Current);
+                    DiscardBytes(reader, length);
                     return true;
                 }
 
@@ -209,7 +209,7 @@ public static class NbtReader
                         return false;
                     }
 
-                    reader.BaseStream.Seek(length * 4L, SeekOrigin.Current);
+                    DiscardBytes(reader, length * 4L);
                     return true;
                 }
 
@@ -221,7 +221,7 @@ public static class NbtReader
                         return false;
                     }
 
-                    reader.BaseStream.Seek(length * 8L, SeekOrigin.Current);
+                    DiscardBytes(reader, length * 8L);
                     return true;
                 }
 
@@ -263,7 +263,31 @@ public static class NbtReader
     private static void SeekString(BinaryReader reader)
     {
         var length = ReadUInt16BigEndian(reader);
-        reader.BaseStream.Seek(length, SeekOrigin.Current);
+        DiscardBytes(reader, length);
+    }
+
+    /// <summary>
+    /// 跳过流中指定长度的字节。level.dat 外面套了 gzip，GZipStream 不支持 Seek，
+    /// 只能分块读出来丢弃；读不动（数据被截断）时按损坏处理。
+    /// </summary>
+    private static void DiscardBytes(BinaryReader reader, long count)
+    {
+        if (count <= 0)
+        {
+            return;
+        }
+
+        var buffer = new byte[Math.Min(count, 81920)];
+        while (count > 0)
+        {
+            var read = reader.Read(buffer, 0, (int)Math.Min(count, buffer.Length));
+            if (read <= 0)
+            {
+                throw new EndOfStreamException();
+            }
+
+            count -= read;
+        }
     }
 
     /// <summary>NBT 的所有多字节整数都是大端序，不能直接用 BinaryReader 的小端读取。</summary>
