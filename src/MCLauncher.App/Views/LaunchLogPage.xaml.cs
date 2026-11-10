@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using MCLauncher.App.ViewModels;
 
 namespace MCLauncher.App.Views;
 
@@ -10,6 +11,15 @@ public partial class LaunchLogPage : UserControl
     {
         InitializeComponent();
         LogBox.TextChanged += OnLogTextChanged;
+
+        // 页面被缓存复用，导航回来时重新读一次 latest.log。
+        Loaded += (_, _) =>
+        {
+            if (DataContext is LaunchLogViewModel viewModel)
+            {
+                viewModel.RefreshFromFile();
+            }
+        };
     }
 
     private void OnLogTextChanged(object sender, TextChangedEventArgs e)
