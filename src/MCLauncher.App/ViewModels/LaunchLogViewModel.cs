@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.IO;
 using System.Text;
 using System.Windows.Input;
@@ -21,15 +22,32 @@ public sealed class LaunchLogViewModel : ViewModelBase
     private readonly object _gate = new();
     private string _logText = string.Empty;
     private string _sourceText = "尚未读取日志文件";
+    private bool _hasProcessOutput;
 
     public LaunchLogViewModel(LauncherStack stack)
     {
         _stack = stack;
 
+        AskDoubaoCommand = new RelayCommand(() => OpenUrl("https://www.doubao.com/chat/"));
+        AskDeepSeekCommand = new RelayCommand(() => OpenUrl("https://chat.deepseek.com/"));
         ClearCommand = new RelayCommand(ClearAll);
 
         // 游戏进程的读取线程是后台线程，必须 marshal 回 UI。
         _stack.LaunchLog.LineAdded += line => UiThread.Post(() => Append(line));
+
+        // 每次启动游戏前缓冲会被清空：界面同步丢掉旧内容，
+        // 之后只显示这一次启动的输出，不再读 latest.log，防止新旧混看。
+        _stack.LaunchLog.Cleared += () => UiThread.Post(() =>
+        {
+            lock (_gate)
+            {
+                _lines.Clear();
+            }
+
+            LogText = string.Empty;
+            _hasProcessOutput = true;
+            SourceText = "本次启动输出";
+        });
     }
 
     public string LogText
@@ -45,14 +63,24 @@ public sealed class LaunchLogViewModel : ViewModelBase
         private set => SetProperty(ref _sourceText, value);
     }
 
+    public ICommand AskDoubaoCommand { get; }
+
+    public ICommand AskDeepSeekCommand { get; }
+
     public ICommand ClearCommand { get; }
 
     /// <summary>
     /// 读取 latest.log：优先 .minecraft/logs，没有则退回当前实例目录的 logs。
+    /// 只在游戏还没启动过时读——启动后的日志就是本次进程输出，不再读旧文件。
     /// 页面每次显示时调用（页面被缓存，导航回来不会重建）。
     /// </summary>
     public void RefreshFromFile()
     {
+        if (_hasProcessOutput)
+        {
+            return;
+        }
+
         foreach (var latest in LatestLogCandidates())
         {
             try
@@ -176,16 +204,30 @@ public sealed class LaunchLogViewModel : ViewModelBase
             }
         }
 
+        // 先清缓冲（会触发 Cleared，界面与 _hasProcessOutput 一起复位），最后再报告结果。
+        _stack.LaunchLog.Clear();
+
         lock (_gate)
         {
             _lines.Clear();
         }
 
         LogText = string.Empty;
-        _stack.LaunchLog.Clear();
         SourceText = failed == 0
             ? $"已删除 {deleted} 个日志文件"
             : $"已删除 {deleted} 个日志文件，{failed} 个删除失败（游戏运行中？）";
+    }
+
+    private static void OpenUrl(string url)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            Debug.WriteLine($"打开链接失败：{url}，{ex.Message}");
+        }
     }
 
     private void Append(string line)

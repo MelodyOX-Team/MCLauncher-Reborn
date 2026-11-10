@@ -21,6 +21,12 @@ public sealed class LaunchLogBuffer
     /// <summary>有新行时触发（在工作线程上，界面需自行 marshal）。</summary>
     public event Action<string>? LineAdded;
 
+    /// <summary>
+    /// 缓冲被清空时触发（例如每次启动游戏前）。界面据此丢掉旧内容，
+    /// 避免上一次游戏的输出和 latest.log 的旧内容混在新一次启动里。
+    /// </summary>
+    public event Action? Cleared;
+
     public int Capacity => _capacity;
 
     public void Append(string line)
@@ -54,6 +60,15 @@ public sealed class LaunchLogBuffer
         lock (_gate)
         {
             _lines.Clear();
+        }
+
+        try
+        {
+            Cleared?.Invoke();
+        }
+        catch
+        {
+            // 订阅方异常不能影响调用方。
         }
     }
 
