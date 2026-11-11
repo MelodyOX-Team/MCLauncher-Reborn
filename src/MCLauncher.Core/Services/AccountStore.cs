@@ -26,6 +26,7 @@ public sealed class AccountStore
     private readonly List<Account> _accounts = new();
     private bool _loadFailed;
     private bool _blockOverwrite;
+    private string? _lastSaveError;
 
     public AccountStore(ConfigService config, ILogger log)
     {
@@ -39,6 +40,9 @@ public sealed class AccountStore
     internal List<Account> Items => _accounts;
 
     public string FilePath => Path.Combine(_config.ConfigDirectory, FileName);
+
+    /// <summary>最近一次保存失败的原因；成功后清空。用于向用户说明安全存储不可用。</summary>
+    public string? LastSaveError => _lastSaveError;
 
     /// <summary>
     /// 读取账号文件；文件缺失、损坏或无法解密时按「没有账号」处理，而不是崩溃。
@@ -60,13 +64,14 @@ public sealed class AccountStore
                     throw new InvalidDataException("accounts.json 内容为空");
                 }
 
-                _accounts.AddRange(AccountsVaultCrypto.Open(vault, out var usedFallback));
+                _accounts.AddRange(AccountsVaultCrypto.Open(vault, out var migratedFromLegacy));
                 _log.Info($"已加载加密账号文件（{vault.Protector}），共 {_accounts.Count} 个账号");
 
-                // TPM 密钥被系统清除/重建时，用 DPAPI 备份救回账号，并重新封装一次文件。
-                if (usedFallback)
+                if (migratedFromLegacy)
                 {
-                    _log.Warn("TPM 密钥已失效，已通过 DPAPI 备份解开账号，正在重新加密保存");
+                    // 旧文件里的 DPAPI 备份只用于这一次救援；立刻重写为单通道格式，
+                    // 让下一次启动不再依赖任何备用旁路。
+                    _log.Warn("检测到旧版账号文件带有 DPAPI 备份旁路，正在按单通道格式重写");
                     Save();
                 }
             }
@@ -111,6 +116,7 @@ public sealed class AccountStore
     {
         if (_blockOverwrite)
         {
+            _lastSaveError = "上次无法解密的账号文件没能备份，已拒绝覆盖";
             _log.Error($"上次无法解密的账号文件没能备份，拒绝覆盖：{FilePath}");
             return false;
         }
@@ -121,10 +127,18 @@ public sealed class AccountStore
                 _accounts,
                 reason => _log.Warn($"TPM 不可用，本次用 DPAPI 保护账号：{reason}"));
             JsonUtil.SerializeToFile(FilePath, vault);
+            _lastSaveError = null;
             return true;
+        }
+        catch (MachineKeyUnavailableException ex)
+        {
+            _lastSaveError = ex.Message;
+            _log.Error($"本机安全存储不可用，已拒绝保存账号：{FilePath}", ex);
+            return false;
         }
         catch (Exception ex)
         {
+            _lastSaveError = ex.Message;
             _log.Error($"保存 accounts.json 失败：{FilePath}", ex);
             return false;
         }
@@ -192,13 +206,15 @@ public sealed class AccountStore
 
         _accounts.Clear();
         _accounts.AddRange(legacy);
-        _config.Settings.LegacyAccounts = null;
 
         if (!Save())
         {
-            _log.Warn("旧账号迁移写入 accounts.json 失败，本次会话仍可使用内存中的账号");
+            // 迁移失败时保留 settings.json 里的旧账号，下次启动再试，避免凭据丢失。
+            _log.Warn("旧账号迁移写入 accounts.json 失败，本次会话仍可使用内存中的账号，下次启动将重试迁移");
+            return;
         }
 
+        _config.Settings.LegacyAccounts = null;
         _config.Save();
         _log.Info($"已将 settings.json 里的 {_accounts.Count} 个旧账号迁移到 accounts.json");
     }
@@ -246,21 +262,22 @@ internal sealed class AccountsVault
     [JsonPropertyName("machineKey")]
     public string MachineKey { get; set; } = string.Empty;
 
-    /// <summary>本机密钥包装后的数据密钥（Base64）。TPM 密钥失效时用下面的 DPAPI 备份解开。</summary>
+    /// <summary>本机密钥包装后的数据密钥（Base64）。</summary>
     [JsonPropertyName("outer")]
     public string Outer { get; set; } = string.Empty;
-
-    /// <summary>DPAPI 兜底备份的受保护软件私钥（Base64）；仅 TPM 模式会写入。</summary>
-    [JsonPropertyName("machineKeyFallback")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? MachineKeyFallback { get; set; }
-
-    /// <summary>DPAPI 兜底备份包装后的数据密钥（Base64）。</summary>
-    [JsonPropertyName("outerFallback")]
-    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
-    public string? OuterFallback { get; set; }
 
     /// <summary>AES-256-GCM 加密的账号列表（Base64：nonce + tag + ciphertext）。</summary>
     [JsonPropertyName("payload")]
     public string Payload { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 旧版遗留的 DPAPI 备份私钥。只为读取旧文件做一次迁移，新文件不再写入，
+    /// 读取后 <see cref="AccountsVaultCrypto.Open(AccountsVault, out bool)"/> 会提示上层立即重写。
+    /// </summary>
+    [JsonPropertyName("machineKeyFallback")]
+    public string? LegacyMachineKeyFallback { get; set; }
+
+    /// <summary>旧版遗留的 DPAPI 备份密文；同样只用于一次性迁移读取。</summary>
+    [JsonPropertyName("outerFallback")]
+    public string? LegacyOuterFallback { get; set; }
 }

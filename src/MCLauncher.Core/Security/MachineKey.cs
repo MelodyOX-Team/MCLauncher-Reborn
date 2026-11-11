@@ -5,8 +5,9 @@ namespace MCLauncher.Core.Security;
 
 /// <summary>
 /// 本机密钥：优先使用 TPM 2.0 的持久化 RSA 密钥；本机不支持或调用失败时降级为
-/// 「软件 RSA 私钥 + DPAPI(CurrentUser) 保护」的系统级方案。两种方式都是非对称加密，
+/// 「软件 RSA 私钥 + DPAPI(CurrentUser) 保护」。两种方式都是非对称加密，
 /// 私钥只存在本机，复制 accounts.json 到别的电脑无法解密。
+/// 两级都不可用时直接抛 <see cref="MachineKeyUnavailableException"/>，不做任何弱保护降级。
 /// </summary>
 internal static class MachineKey
 {
@@ -14,10 +15,15 @@ internal static class MachineKey
 
     private static readonly byte[] DpapiEntropy = Encoding.UTF8.GetBytes("MCLauncher-Reborn/accounts/v1");
 
+    private const string UnavailableMessage =
+        "当前系统无法提供安全存储（TPM 与 DPAPI 均不可用），账号凭据已拒绝保存。"
+        + "请检查系统用户配置或安全策略后再试。";
+
     public sealed record SealedBlob(string Protector, string KeyBlob, byte[] Wrapped);
 
     /// <summary>
     /// 用本机密钥包装：优先 TPM，失败则用 DPAPI 保护的软件私钥。
+    /// DPAPI 也不可用时抛出 <see cref="MachineKeyUnavailableException"/>。
     /// </summary>
     public static SealedBlob Wrap(byte[] data, Action<string>? onTpmFailure = null)
     {
@@ -50,18 +56,21 @@ internal static class MachineKey
             {
                 onTpmFailure?.Invoke("无法打开或创建 TPM 密钥");
             }
+
+            return WrapWithDpapi(data);
         }
 
-        return WrapSoftware(data);
+        throw new MachineKeyUnavailableException(UnavailableMessage);
     }
 
     /// <summary>
-    /// 系统级方案：临时生成软件 RSA 私钥，用 DPAPI(CurrentUser) 加密后随文件保存。
-    /// 非 Windows 开发环境没有 DPAPI，只能退回未绑定的明文私钥。
+    /// 降级方案：临时生成软件 RSA 私钥，用 DPAPI(CurrentUser) 加密后随文件保存。
+    /// DPAPI 调用失败时抛 <see cref="MachineKeyUnavailableException"/>。
     /// </summary>
-    public static SealedBlob WrapSoftware(byte[] data)
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
+    private static SealedBlob WrapWithDpapi(byte[] data)
     {
-        if (OperatingSystem.IsWindows())
+        try
         {
             using var rsa = RSA.Create(2048);
             var protectedKey = ProtectedData.Protect(
@@ -72,13 +81,10 @@ internal static class MachineKey
                 Convert.ToBase64String(protectedKey),
                 rsa.Encrypt(data, RSAEncryptionPadding.OaepSHA256));
         }
-
-        // 非 Windows 开发环境没有 DPAPI/TPM，只能退回未绑定的软件密钥。
-        using var fallback = RSA.Create(2048);
-        return new SealedBlob(
-            "plain",
-            Convert.ToBase64String(fallback.ExportRSAPrivateKey()),
-            fallback.Encrypt(data, RSAEncryptionPadding.OaepSHA256));
+        catch (Exception ex)
+        {
+            throw new MachineKeyUnavailableException(UnavailableMessage, ex);
+        }
     }
 
     /// <summary>
@@ -102,7 +108,7 @@ internal static class MachineKey
             case "tpm2":
                 if (!OperatingSystem.IsWindows())
                 {
-                    throw new PlatformNotSupportedException("TPM 仅在 Windows 上可用，无法解密账号文件");
+                    throw new MachineKeyUnavailableException(UnavailableMessage);
                 }
 
                 return UnwrapWithTpm(keyBlob, wrapped);
@@ -111,21 +117,25 @@ internal static class MachineKey
             {
                 if (!OperatingSystem.IsWindows())
                 {
-                    throw new PlatformNotSupportedException("DPAPI 仅在 Windows 上可用，无法解密账号文件");
+                    throw new MachineKeyUnavailableException(UnavailableMessage);
                 }
 
-                var der = ProtectedData.Unprotect(
-                    Convert.FromBase64String(keyBlob), DpapiEntropy, DataProtectionScope.CurrentUser);
-                using var rsa = RSA.Create();
-                rsa.ImportRSAPrivateKey(der, out _);
-                return rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA256);
-            }
-
-            case "plain":
-            {
-                using var rsa = RSA.Create();
-                rsa.ImportRSAPrivateKey(Convert.FromBase64String(keyBlob), out _);
-                return rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA256);
+                try
+                {
+                    var der = ProtectedData.Unprotect(
+                        Convert.FromBase64String(keyBlob), DpapiEntropy, DataProtectionScope.CurrentUser);
+                    using var rsa = RSA.Create();
+                    rsa.ImportRSAPrivateKey(der, out _);
+                    return rsa.Decrypt(wrapped, RSAEncryptionPadding.OaepSHA256);
+                }
+                catch (MachineKeyUnavailableException)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    throw new MachineKeyUnavailableException("DPAPI 无法解开账号文件，当前用户环境可能已变化。", ex);
+                }
             }
 
             default:

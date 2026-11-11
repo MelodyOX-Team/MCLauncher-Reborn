@@ -10,6 +10,7 @@ namespace MCLauncher.Core.Security;
 /// accounts.json 的加解密流程：
 /// 随机数据密钥 → AES-256-GCM 加密账号 JSON → 数据密钥先被启动器固定密钥包装 → 再被本机密钥包装。
 /// 解密必须同时具备启动器密钥与本机 TPM/DPAPI 私钥，缺一不可。
+/// 本机密钥只有一条通道（TPM 优先，TPM 不可用则改写为 DPAPI），不再保留任何备用旁路。
 /// </summary>
 internal static class AccountsVaultCrypto
 {
@@ -19,11 +20,10 @@ internal static class AccountsVaultCrypto
         var payload = AesGcmBox.Wrap(dataKey, Encoding.UTF8.GetBytes(JsonUtil.Serialize(accounts.ToList())));
 
         var inner = LauncherKey.Wrap(dataKey);
-        var machine = MachineKey.Wrap(inner, onTpmFailure);
 
-        // TPM 密钥可能被系统清除或在别的机器上重建；额外用 DPAPI 备份一份数据密钥，
-        // 这样 TPM 解不开时账号仍能恢复，不会因为硬件密钥变化而丢账号。
-        var fallback = machine.Protector == "tpm2" ? MachineKey.WrapSoftware(inner) : null;
+        // TPM 不可用时这里会自动降级为 DPAPI；DPAPI 也不可用则抛出，
+        // 由上层拒绝保存（不允许写出弱保护或明文凭据）。
+        var machine = MachineKey.Wrap(inner, onTpmFailure);
         CryptographicOperations.ZeroMemory(dataKey);
 
         return new AccountsVault
@@ -31,18 +31,19 @@ internal static class AccountsVaultCrypto
             Protector = machine.Protector,
             MachineKey = machine.KeyBlob,
             Outer = Convert.ToBase64String(machine.Wrapped),
-            MachineKeyFallback = fallback?.KeyBlob,
-            OuterFallback = fallback is null ? null : Convert.ToBase64String(fallback.Wrapped),
             Payload = Convert.ToBase64String(payload),
         };
     }
 
     public static IReadOnlyList<Account> Open(AccountsVault vault) => Open(vault, out _);
 
-    /// <param name="usedFallback">是否通过 DPAPI 备份解开的（说明 TPM 密钥已失效，调用方应重新保存一次）。</param>
-    public static IReadOnlyList<Account> Open(AccountsVault vault, out bool usedFallback)
+    /// <param name="migratedFromLegacy">
+    /// 是否借助旧版遗留的 DPAPI 备份才解开（说明 TPM 密钥已失效）。调用方应立即重写文件，
+    /// 重写后的新文件不再包含任何备用旁路。
+    /// </param>
+    public static IReadOnlyList<Account> Open(AccountsVault vault, out bool migratedFromLegacy)
     {
-        usedFallback = false;
+        migratedFromLegacy = false;
         byte[] inner;
 
         try
@@ -50,13 +51,15 @@ internal static class AccountsVaultCrypto
             inner = MachineKey.Unwrap(
                 vault.Protector, vault.MachineKey, Convert.FromBase64String(vault.Outer));
         }
-        catch (Exception) when (vault.MachineKeyFallback is not null && vault.OuterFallback is not null)
+        catch (Exception) when (vault.LegacyMachineKeyFallback is not null && vault.LegacyOuterFallback is not null)
         {
-            usedFallback = true;
+            // 旧版在 TPM 模式额外写过一份 DPAPI 备份。这里只做一次性兼容读取，
+            // 解出后由 AccountStore 立刻按新格式重写，新文件不会再写入这条旁路。
             inner = MachineKey.Unwrap(
                 "dpapi",
-                vault.MachineKeyFallback,
-                Convert.FromBase64String(vault.OuterFallback));
+                vault.LegacyMachineKeyFallback,
+                Convert.FromBase64String(vault.LegacyOuterFallback));
+            migratedFromLegacy = true;
         }
 
         var dataKey = LauncherKey.Unwrap(inner);

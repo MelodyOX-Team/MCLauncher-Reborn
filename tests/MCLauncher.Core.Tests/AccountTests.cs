@@ -267,28 +267,23 @@ public sealed class AccountTests
     }
 
     [Fact]
-    public void TPM密文失效时用DPAPI备份恢复账号()
+    public void 账号文件只有一条本机密钥通道没有备用旁路()
     {
         WithConfig((config, log, dir) =>
         {
             var service = new AccountService(config, log);
-            service.AddOffline("兜底账号");
+            service.AddOffline("单通道账号");
 
             var path = Path.Combine(config.ConfigDirectory, AccountStore.FileName);
-            var node = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            var vault = File.ReadAllText(path);
 
-            // 本机没有可用 TPM 时只写 DPAPI 一路，没有备份可测。
-            if (node["outerFallback"] is null)
-            {
-                return;
-            }
+            // 不允许再写入任何可绕过 TPM/DPAPI 主通道的备用包装。
+            Assert.DoesNotContain("machineKeyFallback", vault);
+            Assert.DoesNotContain("outerFallback", vault);
+            Assert.Contains("\"protector\"", vault);
 
-            // 只破坏 TPM 那一路密文，模拟 TPM 密钥被系统清除后换成了新密钥。
-            node["outer"] = Convert.ToBase64String(new byte[256]);
-            File.WriteAllText(path, node.ToJsonString());
-
-            var reloaded = new AccountService(config, log);
-            Assert.Equal("兜底账号", Assert.Single(reloaded.Accounts).Name);
+            // 同一台机器重启后仍能正常解回账号。
+            Assert.Equal("单通道账号", Assert.Single(new AccountService(config, log).Accounts).Name);
         });
     }
 

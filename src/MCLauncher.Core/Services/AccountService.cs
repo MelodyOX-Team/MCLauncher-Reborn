@@ -1,5 +1,6 @@
 using MCLauncher.Core.Abstractions;
 using MCLauncher.Core.Models;
+using MCLauncher.Core.Security;
 using MCLauncher.Core.Utils;
 
 namespace MCLauncher.Core.Services;
@@ -72,7 +73,7 @@ public sealed class AccountService
         var account = Account.CreateOffline(trimmed, uuid);
         _store.Items.Add(account);
         _config.Settings.SelectedAccountUuid = account.Uuid;
-        Persist();
+        PersistOrThrow();
         _log.Info($"已添加离线账号：{account.Name}");
         return account;
     }
@@ -91,7 +92,7 @@ public sealed class AccountService
         }
 
         _config.Settings.SelectedAccountUuid = account.Uuid;
-        Persist();
+        PersistOrThrow();
     }
 
     public void Select(Account account)
@@ -158,6 +159,21 @@ public sealed class AccountService
     private void Persist()
     {
         _store.Save();
+        _config.Save();
+    }
+
+    /// <summary>
+    /// 登录/新增账号时的落盘：本机安全存储不可用会导致账号无法安全保存，
+    /// 这里直接抛出并让界面提示用户，而不是静默丢弃凭据。
+    /// </summary>
+    private void PersistOrThrow()
+    {
+        if (!_store.Save())
+        {
+            throw new MachineKeyUnavailableException(
+                _store.LastSaveError ?? "账号凭据无法安全保存，已拒绝登录。");
+        }
+
         _config.Save();
     }
 }
