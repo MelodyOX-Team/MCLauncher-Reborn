@@ -30,10 +30,21 @@
         </Button>
 
         <!-- 启动公告：贴在账号块下方，窄卡片样式，不占整行 -->
+        <!-- 启动输出出现时收起公告，避免默认窗口尺寸下两块内容互相遮挡 -->
         <Border Width="300"
                 HorizontalAlignment="Left" VerticalAlignment="Top" Margin="16,76,0,0"
-                Background="#99000000" CornerRadius="6" Padding="10,9"
-                Visibility="{Binding DataContext.HasNotice, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}">
+                Background="#99000000" CornerRadius="6" Padding="10,9">
+            <Border.Style>
+                <Style TargetType="Border">
+                    <Setter Property="Visibility"
+                            Value="{Binding DataContext.HasNotice, RelativeSource={RelativeSource AncestorType=Window}, Converter={StaticResource BoolToVis}}"/>
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding HasLaunchOutput}" Value="True">
+                            <Setter Property="Visibility" Value="Collapsed"/>
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Border.Style>
             <StackPanel>
                 <TextBlock Text="{Binding DataContext.NoticeTitle, RelativeSource={RelativeSource AncestorType=Window}}"
                            FontSize="12.5" FontWeight="SemiBold" Foreground="White"
@@ -54,9 +65,9 @@
             </StackPanel>
         </Border>
 
-        <!-- 启动输出：点击启动后才出现，固定在底部，避免与左上角公告在默认窗口尺寸下重叠 -->
-        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Bottom"
-                    Margin="16,0,16,20" Width="560" MaxHeight="330"
+        <!-- 启动输出：点击启动后才出现，垂直居中（公告此时已收起，不会重叠） -->
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Margin="0,0,0,120" Width="560" MaxHeight="330"
                     Visibility="{Binding HasLaunchOutput, Converter={StaticResource BoolToVis}}">
             <Border CornerRadius="8" Padding="10,8">
                 <Border.Style>
