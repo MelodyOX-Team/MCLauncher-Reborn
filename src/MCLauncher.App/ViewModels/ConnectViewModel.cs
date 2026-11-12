@@ -1135,9 +1135,14 @@ public sealed class ConnectViewModel : ViewModelBase
 
             ApplyTunnels(tunnels);
 
-            // 密钥确实能通才落盘，避免把写错的密钥存进设置。
-            _stack.Config.Settings.FrpAccessKey = token;
-            _stack.Config.Save();
+            // 密钥确实能通才落盘，避免把写错的密钥存进设置；
+            // 请求期间用户可能已经改了输入，只有当前输入仍是这次的 token 才回写，
+            // 否则会把旧密钥覆盖到用户刚填的新值上。
+            if (string.Equals(FrpAccessKey.Trim(), token, StringComparison.Ordinal))
+            {
+                _stack.Config.Settings.FrpAccessKey = token;
+                _stack.Config.Save();
+            }
 
             FrpTunnelStatus = tunnels.Count == 0
                 ? "已连接，账号下还没有隧道。点「新建隧道」创建一条。"

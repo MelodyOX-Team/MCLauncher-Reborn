@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 using MCLauncher.Core.Abstractions;
+using MCLauncher.Core.Utils;
 
 namespace MCLauncher.Core.Network;
 
@@ -70,6 +71,12 @@ public sealed class DownloadBatch
         IProgress<DownloadBatchProgress>? progress = null,
         CancellationToken ct = default)
     {
+        // 同一目标可能被多条下载路径要求；并发写同一个 .part 会互相破坏，按规范化路径只保留一条。
+        requests = requests
+            .GroupBy(request => PathUtil.Normalize(request.TargetPath), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToList();
+
         if (requests.Count == 0)
         {
             return new DownloadBatchResult();
@@ -158,12 +165,7 @@ public sealed class DownloadBatch
                 {
                     if (outcome.Skipped)
                     {
-                        // 已存在的文件没有进度回调，直接把它的体积计入总量。
-                        if (request.Checker.Size > 0)
-                        {
-                            Interlocked.Add(ref downloadedBytes, request.Checker.Size);
-                        }
-
+                        // DownloadAsync 在「已存在」时已经通过进度回调把体积计入一次，这里不能再加。
                         Interlocked.Increment(ref skipped);
                     }
                     else

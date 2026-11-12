@@ -156,7 +156,8 @@ public sealed class GameVersionJson
     /// <summary>是否使用旧式参数（结构化 <see cref="Arguments"/> 为空且存在 <see cref="MinecraftArguments"/>）。</summary>
     [JsonIgnore]
     public bool UsesLegacyArguments =>
-        (Arguments is null || (Arguments.Game.Count == 0 && Arguments.Jvm.Count == 0))
+        (Arguments is null
+            || ((Arguments.Game?.Count ?? 0) == 0 && (Arguments.Jvm?.Count ?? 0) == 0))
         && !string.IsNullOrWhiteSpace(MinecraftArguments);
 
     /// <summary>该版本要求的 Java 主版本。</summary>

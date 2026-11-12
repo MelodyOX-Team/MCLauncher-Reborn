@@ -38,14 +38,23 @@ public sealed class ServerListService
 
         var servers = LoadBigEndian(path);
 
-        // 旧版本启动器曾用小端写入，游戏无法读取；这里尽量把数据捞回来并改写成标准格式。
+        // 旧版本启动器曾用小端写入，游戏无法读取。读出来后立即转换成标准大端格式；
+        // Save 内部对"结构无法解析且不是旧版格式"的文件有覆盖保护，不会误删用户数据。
         if (servers.Count == 0 && IsLegacyLittleEndian(path))
         {
             servers = LoadLegacyLittleEndian(path);
             if (servers.Count > 0)
             {
-                _log.Warn($"检测到旧版小端 servers.dat，已读取 {servers.Count} 条并转换为标准格式：{path}");
-                Save(instanceDirectory, servers);
+                if (Save(instanceDirectory, servers))
+                {
+                    _log.Info(
+                        $"检测到旧版小端 servers.dat，已转换 {servers.Count} 条为标准格式：{path}");
+                }
+                else
+                {
+                    _log.Warn(
+                        $"检测到旧版小端 servers.dat，已读取 {servers.Count} 条，但转换写入失败：{path}");
+                }
             }
         }
 
@@ -90,6 +99,47 @@ public sealed class ServerListService
         {
             _log.Warn($"读取服务器列表失败：{path}", ex);
             return Array.Empty<MinecraftServerEntry>();
+        }
+    }
+
+    /// <summary>只检查文件结构里是否存在 <c>servers</c> 列表，不解析具体条目。</summary>
+    private static bool HasReadableServersList(string path)
+    {
+        try
+        {
+            using var stream = File.OpenRead(path);
+            using var reader = new BinaryReader(stream, Encoding.UTF8);
+
+            if (reader.ReadByte() != NbtReader.TagCompound)
+            {
+                return false;
+            }
+
+            _ = NbtReader.ReadString(reader); // 根标签名
+
+            while (true)
+            {
+                var type = reader.ReadByte();
+                if (type == NbtReader.TagEnd)
+                {
+                    return false;
+                }
+
+                var name = NbtReader.ReadString(reader);
+                if (type == NbtReader.TagList && name == "servers")
+                {
+                    return true;
+                }
+
+                if (!NbtReader.Skip(reader, type))
+                {
+                    return false;
+                }
+            }
+        }
+        catch (Exception ex) when (ex is IOException or EndOfStreamException or InvalidDataException)
+        {
+            return false;
         }
     }
 
@@ -239,6 +289,17 @@ public sealed class ServerListService
 
         try
         {
+            // 现有文件存在但结构读不出来时，说明用户手里是一份我们无法安全解析的列表；
+            // 此时覆盖会永久丢失原数据，因此直接放弃写入（旧版小端格式仍允许转换）。
+            if (File.Exists(path)
+                && new FileInfo(path).Length > 0
+                && !HasReadableServersList(path)
+                && !IsLegacyLittleEndian(path))
+            {
+                _log.Warn($"现有 servers.dat 无法解析，为避免覆盖原始内容已取消写入：{path}");
+                return false;
+            }
+
             Directory.CreateDirectory(instanceDirectory);
 
             using (var stream = File.Create(temp))
@@ -269,6 +330,8 @@ public sealed class ServerListService
                         WriteString(writer, server.IconBase64!);
                     }
 
+                    // TODO(待实测)：acceptTextures 是 TAG_Byte，但 1/2 分别代表 Always/Never 的
+                    // 映射尚未用实机存档确认；在确证前沿用现有编码，且不再自动重写用户的 servers.dat。
                     if (server.ResourcePolicy != ServerResourcePackPolicy.Ask)
                     {
                         writer.Write(NbtReader.TagByte);

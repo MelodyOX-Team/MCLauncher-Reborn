@@ -5,6 +5,7 @@ using System.Text;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using MCLauncher.App.ViewModels.Mvvm;
 using MCLauncher.Core.Connect;
 using MCLauncher.Core.Models;
@@ -26,6 +27,8 @@ public sealed class HomeViewModel : ViewModelBase
     private readonly AsyncRelayCommand _completeCommand;
     private readonly AsyncRelayCommand _upgradeCommand;
     private readonly StringBuilder _launchBuilder = new();
+    private readonly StringBuilder _pendingLaunchOutput = new();
+    private readonly DispatcherTimer _launchFlushTimer;
     private readonly AvatarService _avatars;
     private readonly DownloadFileRows _launchRows = new();
     private readonly DownloadFileRows _updateRows = new();
@@ -88,6 +91,18 @@ public sealed class HomeViewModel : ViewModelBase
         LaunchCommand = _launchCommand;
         CompleteCommand = _completeCommand;
         UpgradeCommand = _upgradeCommand;
+
+        // 输出行可能每秒几十条：先攒进缓冲，由 100ms 的定时器批量刷新，
+        // 避免每行都重建最多 6 万字符的整串（那是启动面板卡顿的主因）。
+        _launchFlushTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(100),
+        };
+        _launchFlushTimer.Tick += (_, _) =>
+        {
+            _launchFlushTimer.Stop();
+            FlushLaunchOutput();
+        };
 
         // 游戏 stdout/stderr 在后台线程逐行到达，这里追加到启动面板。
         _stack.LaunchLog.LineAdded += line => UiThread.Post(() => AppendLaunchLine(line));
@@ -779,8 +794,7 @@ public sealed class HomeViewModel : ViewModelBase
         _launchRows.Clear();
         IsLaunchFailed = false;
         var session = ++_launchSession;
-        _launchBuilder.Clear();
-        LaunchOutput = string.Empty;
+        ResetLaunchOutput();
         HasLaunchOutput = true;
         _suppressLaunchOutput = false;
         _lastStage = string.Empty;
@@ -935,8 +949,7 @@ public sealed class HomeViewModel : ViewModelBase
         Progress = 0;
         LaunchSpeedText = string.Empty;
         _launchRows.Clear();
-        LaunchOutput = string.Empty;
-        _launchBuilder.Clear();
+        ResetLaunchOutput();
 
         // 启动器窗口行为：保持显示 / 隐藏 / 退出 / 隐藏并等游戏结束后再显示。
         // 游戏在这 3 秒里已经退出时不再隐藏/关闭，否则会把崩溃诊断界面盖掉。
@@ -1232,7 +1245,7 @@ public sealed class HomeViewModel : ViewModelBase
         }
     }
 
-    /// <summary>逐行追加输出，并裁掉过长的历史内容，避免界面越跑越卡。</summary>
+    /// <summary>行先进入缓冲，由定时器统一刷新，避免每行都重建超大字符串。</summary>
     private void AppendLaunchLine(string? line)
     {
         if (_suppressLaunchOutput || string.IsNullOrEmpty(line))
@@ -1240,13 +1253,39 @@ public sealed class HomeViewModel : ViewModelBase
             return;
         }
 
-        _launchBuilder.AppendLine(line);
+        _pendingLaunchOutput.AppendLine(line);
+        if (!_launchFlushTimer.IsEnabled)
+        {
+            _launchFlushTimer.Start();
+        }
+    }
+
+    /// <summary>把缓冲里的行合并进启动面板，并裁掉过长的历史内容。</summary>
+    private void FlushLaunchOutput()
+    {
+        if (_pendingLaunchOutput.Length == 0)
+        {
+            return;
+        }
+
+        _launchBuilder.Append(_pendingLaunchOutput);
+        _pendingLaunchOutput.Clear();
+
         if (_launchBuilder.Length > MaxOutputChars)
         {
             _launchBuilder.Remove(0, _launchBuilder.Length - MaxOutputChars);
         }
 
         LaunchOutput = _launchBuilder.ToString();
+    }
+
+    /// <summary>开始新一次启动时清空面板：未刷新的缓冲与定时器也要一起复位。</summary>
+    private void ResetLaunchOutput()
+    {
+        _launchFlushTimer.Stop();
+        _pendingLaunchOutput.Clear();
+        _launchBuilder.Clear();
+        LaunchOutput = string.Empty;
     }
 
     private async Task WatchExitAsync(
@@ -1260,7 +1299,10 @@ public sealed class HomeViewModel : ViewModelBase
             var exitCode = await process.WaitForExitAsync();
             _stack.Log.Info($"游戏进程已退出：{exitCode}");
 
-            var crash = AnalyzeCrash(exitCode, instanceDirectory, launchedAt);
+            // 崩溃分析要读崩溃报告并拼接整段启动日志，放到后台线程执行，
+            // 否则游戏退出瞬间会卡住界面；结果仍由下面的 UiThread.Post 回填。
+            var crash = await Task.Run(() => AnalyzeCrash(exitCode, instanceDirectory, launchedAt));
+
             var postLaunch = _stack.Config.Settings.PostLaunchCommand;
             var commandDirectory = ResolveLaunchDirectory(version);
 

@@ -39,7 +39,9 @@ public sealed class JavaServiceTests
         var java = FindRealJava();
         if (java is null)
         {
-            return; // 机器上没有 Java 时跳过（不影响其它用例）
+            // 机器上没有 Java 时跳过。项目用的 xunit 2.9.3 没有 Assert.Skip
+            // （动态跳过是 v3 的能力），也没有引入跳过相关的扩展包，只能直接返回。
+            return;
         }
 
         var service = new JavaService(new TestLog());

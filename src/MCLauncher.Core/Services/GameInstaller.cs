@@ -130,6 +130,46 @@ public sealed class GameInstaller
     }
 
     /// <summary>
+    /// 远端 JSON 里的路径段（资源索引 id、对象 hash、日志文件名等）不可信，
+    /// 落盘前必须确认最终路径仍位于 <paramref name="root"/> 之内。
+    /// </summary>
+    private static string EnsureInside(string root, string fullPath)
+    {
+        var normalizedRoot = Path.GetFullPath(root);
+
+        string normalized;
+        try
+        {
+            normalized = Path.GetFullPath(fullPath);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            throw new InvalidDataException($"路径不合法：{fullPath}", ex);
+        }
+
+        // 前缀比较由 PathUtil.IsParentOf 负责：它会去掉末尾分隔符并忽略大小写。
+        if (!PathUtil.IsParentOf(normalizedRoot, normalized))
+        {
+            throw new InvalidDataException($"路径越界：{fullPath}");
+        }
+
+        return normalized;
+    }
+
+    private static string SafeAssetsIndexPath(string gameDirectory, string indexId) =>
+        EnsureInside(
+            Path.Combine(AssetsDirectory(gameDirectory), "indexes"),
+            AssetsIndexPath(gameDirectory, indexId));
+
+    private static string SafeAssetsObjectPath(string gameDirectory, string hash) =>
+        EnsureInside(AssetsObjectsDirectory(gameDirectory), AssetsObjectPath(gameDirectory, hash));
+
+    private static string SafeVirtualAssetsDirectory(string gameDirectory, string indexId) =>
+        EnsureInside(
+            Path.Combine(AssetsDirectory(gameDirectory), "virtual"),
+            VirtualAssetsDirectory(gameDirectory, indexId));
+
+    /// <summary>
     /// 清理旧版本写入的受管清单；目录为空时一并删除。
     /// 安装过程不需要持久化文件清单，相关数据只在内存中使用。
     /// </summary>
@@ -273,13 +313,21 @@ public sealed class GameInstaller
 
         if (indexInfo is not null)
         {
-            preRequests.Add(new DownloadRequest
+            try
             {
-                Name = $"assets/indexes/{indexInfo.Id}.json",
-                Candidates = _resolver.Resolve(indexInfo.Url!, DownloadUrlKind.AssetIndex),
-                TargetPath = AssetsIndexPath(gameDirectory, indexInfo.Id!),
-                Checker = MakeChecker(indexInfo, options.VerifyExisting),
-            });
+                preRequests.Add(new DownloadRequest
+                {
+                    Name = $"assets/indexes/{indexInfo.Id}.json",
+                    Candidates = _resolver.Resolve(indexInfo.Url!, DownloadUrlKind.AssetIndex),
+                    TargetPath = SafeAssetsIndexPath(gameDirectory, indexInfo.Id!),
+                    Checker = MakeChecker(indexInfo, options.VerifyExisting),
+                });
+            }
+            catch (InvalidDataException ex)
+            {
+                _log.Warn($"资源索引 id 不合法，已跳过资源下载：{indexInfo.Id}", ex);
+                indexInfo = null;
+            }
         }
 
         var logRequest = BuildLogConfigRequest(gameDirectory, version, options);
@@ -445,7 +493,15 @@ public sealed class GameInstaller
         var indexInfo = ResolveAssetIndexInfo(version);
         if (indexInfo is not null)
         {
-            checks.Add((AssetsIndexPath(gameDirectory, indexInfo.Id!), MakeChecker(indexInfo, deep)));
+            try
+            {
+                checks.Add((SafeAssetsIndexPath(gameDirectory, indexInfo.Id!), MakeChecker(indexInfo, deep)));
+            }
+            catch (InvalidDataException ex)
+            {
+                _log.Warn($"资源索引 id 不合法：{indexInfo.Id}", ex);
+                missing.Add(indexInfo.Id!);
+            }
         }
 
         foreach (var (path, checker) in checks)
@@ -465,7 +521,18 @@ public sealed class GameInstaller
             {
                 foreach (var (name, obj) in index.Objects)
                 {
-                    var objectPath = AssetsObjectPath(gameDirectory, obj.Hash);
+                    string objectPath;
+                    try
+                    {
+                        objectPath = SafeAssetsObjectPath(gameDirectory, obj.Hash);
+                    }
+                    catch (InvalidDataException ex)
+                    {
+                        _log.Warn($"资源对象 hash 不合法，已跳过：{name}", ex);
+                        missing.Add(name);
+                        continue;
+                    }
+
                     var checker = deep ? FileChecker.Of(obj.Hash, obj.Size) : FileChecker.OfSize(obj.Size);
                     if (!checker.Check(objectPath))
                     {
@@ -526,7 +593,17 @@ public sealed class GameInstaller
             return AssetsDirectory(gameDirectory);
         }
 
-        var virtualDirectory = VirtualAssetsDirectory(gameDirectory, indexInfo.Id);
+        string virtualDirectory;
+        try
+        {
+            virtualDirectory = SafeVirtualAssetsDirectory(gameDirectory, indexInfo.Id);
+        }
+        catch (InvalidDataException)
+        {
+            // 索引 id 不合法时退回 assets 根，避免把越界目录当成资源根。
+            return AssetsDirectory(gameDirectory);
+        }
+
         if (!Directory.Exists(virtualDirectory))
         {
             return AssetsDirectory(gameDirectory);
@@ -549,7 +626,19 @@ public sealed class GameInstaller
             return null;
         }
 
-        var target = VersionRepository.VersionJarPath(gameDirectory, jarId);
+        // jar 字段同样来自远端 JSON，必须确认落盘位置没有越出 versions 目录。
+        string target;
+        try
+        {
+            target = EnsureInside(
+                VersionRepository.VersionsDirectory(gameDirectory),
+                VersionRepository.VersionJarPath(gameDirectory, jarId));
+        }
+        catch (InvalidDataException ex)
+        {
+            _log.Warn($"客户端 jar 的版本 id 不合法，已跳过下载：{jarId}", ex);
+            return null;
+        }
 
         if (version.Downloads?.Client is { Url.Length: > 0 } client)
         {
@@ -638,11 +727,24 @@ public sealed class GameInstaller
             return null;
         }
 
+        string target;
+        try
+        {
+            target = EnsureInside(
+                LogConfigDirectory(gameDirectory),
+                Path.Combine(LogConfigDirectory(gameDirectory), file.Id!));
+        }
+        catch (InvalidDataException ex)
+        {
+            _log.Warn($"日志配置文件名不合法，已跳过：{file.Id}", ex);
+            return null;
+        }
+
         return new DownloadRequest
         {
             Name = $"assets/log_configs/{file.Id}",
             Candidates = _resolver.Resolve(file.Url, DownloadUrlKind.Metadata),
-            TargetPath = Path.Combine(LogConfigDirectory(gameDirectory), file.Id!),
+            TargetPath = target,
             Checker = MakeChecker(file.Sha1, file.Size, options.VerifyExisting),
             Optional = true,
         };
@@ -660,13 +762,24 @@ public sealed class GameInstaller
         var requests = new List<DownloadRequest>(index.Objects.Count);
         foreach (var (name, obj) in index.Objects)
         {
+            string target;
+            try
+            {
+                target = SafeAssetsObjectPath(gameDirectory, obj.Hash);
+            }
+            catch (InvalidDataException ex)
+            {
+                _log.Warn($"资源对象 hash 不合法，已跳过：{name}", ex);
+                continue;
+            }
+
             requests.Add(new DownloadRequest
             {
                 Name = name,
                 Candidates = _resolver.Resolve(
                     $"https://resources.download.minecraft.net/{obj.RelativePath}",
                     DownloadUrlKind.Asset),
-                TargetPath = AssetsObjectPath(gameDirectory, obj.Hash),
+                TargetPath = target,
                 Checker = MakeChecker(obj.Hash, obj.Size, options.VerifyExisting),
             });
         }
@@ -715,7 +828,17 @@ public sealed class GameInstaller
             return null;
         }
 
-        var path = AssetsIndexPath(gameDirectory, indexInfo.Id);
+        string path;
+        try
+        {
+            path = SafeAssetsIndexPath(gameDirectory, indexInfo.Id);
+        }
+        catch (InvalidDataException ex)
+        {
+            _log.Warn($"资源索引 id 不合法，无法读取索引：{indexInfo.Id}", ex);
+            return null;
+        }
+
         if (!File.Exists(path))
         {
             return null;
@@ -765,9 +888,18 @@ public sealed class GameInstaller
     {
         // 与官方启动器一致：virtual 与 map_to_resources 都会在 assets/virtual/<id> 下再铺一份；
         // 两者都为假时不得凭空创建目录。
-        var virtualDirectory = (index.Virtual || index.MapToResources) && indexInfo.Id is not null
-            ? VirtualAssetsDirectory(gameDirectory, indexInfo.Id)
-            : null;
+        string? virtualDirectory = null;
+        if ((index.Virtual || index.MapToResources) && indexInfo.Id is not null)
+        {
+            try
+            {
+                virtualDirectory = SafeVirtualAssetsDirectory(gameDirectory, indexInfo.Id);
+            }
+            catch (InvalidDataException ex)
+            {
+                _log.Warn($"资源索引 id 不合法，已跳过 virtual 展开：{indexInfo.Id}", ex);
+            }
+        }
 
         var resourcesDirectory = index.MapToResources ? ResourcesDirectory(gameDirectory) : null;
 
@@ -775,18 +907,48 @@ public sealed class GameInstaller
 
         foreach (var (name, obj) in index.Objects)
         {
-            var source = AssetsObjectPath(gameDirectory, obj.Hash);
+            string source;
+            try
+            {
+                source = SafeAssetsObjectPath(gameDirectory, obj.Hash);
+            }
+            catch (InvalidDataException ex)
+            {
+                _log.Warn($"资源对象 hash 不合法，已跳过：{name}", ex);
+                continue;
+            }
+
             if (!File.Exists(source))
             {
                 continue;
             }
 
-            if (virtualDirectory is not null && CopyIfMissing(source, CombineUnder(virtualDirectory, name)))
+            string? virtualTarget = null;
+            string? resourcesTarget = null;
+            try
+            {
+                if (virtualDirectory is not null)
+                {
+                    virtualTarget = CombineUnder(virtualDirectory, name);
+                }
+
+                if (resourcesDirectory is not null)
+                {
+                    resourcesTarget = CombineUnder(resourcesDirectory, name);
+                }
+            }
+            catch (InvalidDataException ex)
+            {
+                _log.Warn($"资源名不合法，已跳过：{name}", ex);
+                continue;
+            }
+
+            if (virtualTarget is not null && CopyIfMissing(source, virtualTarget))
             {
                 copied++;
             }
 
-            if (resourcesDirectory is not null && CopyIfMissing(source, CombineUnder(resourcesDirectory, name)))
+            if (resourcesTarget is not null && CopyIfMissing(source, resourcesTarget))
             {
                 copied++;
             }
@@ -797,7 +959,7 @@ public sealed class GameInstaller
     }
 
     private static string CombineUnder(string root, string assetName) =>
-        Path.Combine(root, assetName.Replace('/', Path.DirectorySeparatorChar));
+        EnsureInside(root, Path.Combine(root, assetName.Replace('/', Path.DirectorySeparatorChar)));
 
     private bool CopyIfMissing(string source, string target)
     {

@@ -12,6 +12,12 @@ namespace MCLauncher.Core.Utils;
 /// </summary>
 public static class NbtReader
 {
+    /// <summary>
+    /// NBT 嵌套深度上限。损坏或恶意构造的存档可以嵌套上万层 compound/list，
+    /// 递归不设限会直接抛 StackOverflowException（进程无法捕获），因此超限一律按不可解析处理。
+    /// </summary>
+    internal const int MaxDepth = 512;
+
     private static readonly byte[] GzipMagic = { 0x1F, 0x8B };
 
     /// <summary>读取存档的显示名与游戏版本；失败时返回 false（损坏的存档不应让界面崩掉）。</summary>
@@ -57,7 +63,12 @@ public static class NbtReader
                 }
 
                 _ = ReadString(reader); // 根标签名（通常是空串）
-                return ReadCompound(reader, string.Empty, ref levelName, ref versionName);
+                if (!ReadCompound(reader, string.Empty, ref levelName, ref versionName, depth: 0))
+                {
+                    return false;
+                }
+
+                return levelName is not null || versionName is not null;
             }
             finally
             {
@@ -88,14 +99,16 @@ public static class NbtReader
         BinaryReader reader,
         string prefix,
         ref string? levelName,
-        ref string? versionName)
+        ref string? versionName,
+        int depth)
     {
         while (true)
         {
             var type = reader.ReadByte();
             if (type == TagEnd)
             {
-                return levelName is not null || versionName is not null;
+                // 这里只表示"结构完整地读完了"，是否命中字段由调用方判断。
+                return true;
             }
 
             var name = ReadString(reader);
@@ -109,7 +122,17 @@ public static class NbtReader
 
             if (type == TagCompound)
             {
-                ReadCompound(reader, path, ref levelName, ref versionName);
+                // 深度超限直接放弃整个存档，避免递归继续加深导致栈溢出。
+                if (depth >= MaxDepth)
+                {
+                    return false;
+                }
+
+                if (!ReadCompound(reader, path, ref levelName, ref versionName, depth + 1))
+                {
+                    return false;
+                }
+
                 continue;
             }
 
@@ -126,8 +149,8 @@ public static class NbtReader
         }
     }
 
-    /// <summary>跳过指定类型的负载。返回 false 表示数据已损坏。</summary>
-    internal static bool Skip(BinaryReader reader, byte type)
+    /// <summary>跳过指定类型的负载。返回 false 表示数据已损坏或嵌套过深。</summary>
+    internal static bool Skip(BinaryReader reader, byte type, int depth = 0)
     {
         switch (type)
         {
@@ -167,6 +190,12 @@ public static class NbtReader
 
             case TagList:
                 {
+                    // 列表元素也可能是 compound / 嵌套 list，深度超限时按损坏处理。
+                    if (depth >= MaxDepth)
+                    {
+                        return false;
+                    }
+
                     var elementType = reader.ReadByte();
                     var length = ReadInt32BigEndian(reader);
                     if (length < 0)
@@ -182,14 +211,7 @@ public static class NbtReader
                             break;
                         }
 
-                        if (elementType == TagCompound)
-                        {
-                            if (!SkipCompound(reader))
-                            {
-                                return false;
-                            }
-                        }
-                        else if (!Skip(reader, elementType))
+                        if (!Skip(reader, elementType, depth + 1))
                         {
                             return false;
                         }
@@ -199,7 +221,7 @@ public static class NbtReader
                 }
 
             case TagCompound:
-                return SkipCompound(reader);
+                return SkipCompound(reader, depth);
 
             case TagIntArray:
                 {
@@ -230,8 +252,13 @@ public static class NbtReader
         }
     }
 
-    private static bool SkipCompound(BinaryReader reader)
+    private static bool SkipCompound(BinaryReader reader, int depth)
     {
+        if (depth >= MaxDepth)
+        {
+            return false;
+        }
+
         while (true)
         {
             var type = reader.ReadByte();
@@ -241,7 +268,7 @@ public static class NbtReader
             }
 
             SeekString(reader); // 标签名
-            if (!Skip(reader, type))
+            if (!Skip(reader, type, depth + 1))
             {
                 return false;
             }

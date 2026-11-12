@@ -126,7 +126,11 @@ public sealed class VersionRepository
             throw new DirectoryNotFoundException($"版本目录不存在：{oldDirectory}");
         }
 
-        if (Directory.Exists(newDirectory))
+        // 仅大小写不同的改名（ABC → abc）仍指向同一个目录，不算冲突，必须放行。
+        var caseOnlyRename = !string.Equals(oldDirectory, newDirectory, StringComparison.Ordinal)
+                             && string.Equals(oldDirectory, newDirectory, StringComparison.OrdinalIgnoreCase);
+
+        if (Directory.Exists(newDirectory) && !caseOnlyRename)
         {
             throw new IOException($"目标版本已存在：{newId}");
         }

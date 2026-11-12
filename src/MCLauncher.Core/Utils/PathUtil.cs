@@ -58,9 +58,29 @@ public static class PathUtil
         return result.Length == 0 ? "_" : result;
     }
 
+    /// <summary>Windows 保留设备名：即使带扩展名也会被系统当成设备。</summary>
+    private static readonly HashSet<string> ReservedDeviceNames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    };
+
     /// <summary>文件名是否可安全用作实例名 / 目录名。</summary>
-    public static bool IsValidFileName(string name) =>
-        !string.IsNullOrWhiteSpace(name)
-        && name.IndexOfAny(Path.GetInvalidFileNameChars()) < 0
-        && !name.Contains("..", StringComparison.Ordinal);
+    public static bool IsValidFileName(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)
+            || name.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
+            || name.Contains("..", StringComparison.Ordinal)
+            || name.EndsWith(' ')
+            || name.EndsWith('.'))
+        {
+            return false;
+        }
+
+        // 设备名判断要去掉扩展名；Windows 同时忽略结尾的点与空格。
+        var dot = name.IndexOf('.');
+        var stem = (dot >= 0 ? name[..dot] : name).TrimEnd(' ', '.');
+        return !ReservedDeviceNames.Contains(stem);
+    }
 }

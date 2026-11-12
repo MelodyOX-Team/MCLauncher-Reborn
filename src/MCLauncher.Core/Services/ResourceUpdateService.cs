@@ -135,7 +135,9 @@ public sealed class ResourceUpdateService
         IProgress<string>? status,
         CancellationToken ct)
     {
-        var hashMap = new Dictionary<string, LocalResource>(StringComparer.OrdinalIgnoreCase);
+        // 同一个哈希可能对应多份本地文件（例如两份完全相同的整合包副本），
+        // 用列表保存，保证它们都参与匹配而不是只算第一份。
+        var hashMap = new Dictionary<string, List<LocalResource>>(StringComparer.OrdinalIgnoreCase);
         status?.Report("正在计算本地文件 SHA-1…");
 
         foreach (var resource in files)
@@ -143,8 +145,15 @@ public sealed class ResourceUpdateService
             ct.ThrowIfCancellationRequested();
             try
             {
-                var sha1 = await Task.Run(() => ComputeSha1(resource.FilePath), ct).ConfigureAwait(false);
-                hashMap.TryAdd(sha1, resource);
+                var sha1 = await Task.Run(() => ComputeSha1(resource.FilePath, ct), ct).ConfigureAwait(false);
+                if (hashMap.TryGetValue(sha1, out var sameFiles))
+                {
+                    sameFiles.Add(resource);
+                }
+                else
+                {
+                    hashMap[sha1] = new List<LocalResource> { resource };
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -165,52 +174,56 @@ public sealed class ResourceUpdateService
         {
             ct.ThrowIfCancellationRequested();
 
-            if (!hashMap.TryGetValue(hash, out var resource))
+            if (!hashMap.TryGetValue(hash, out var resources))
             {
                 continue;
             }
 
-            result[resource.FilePath] = null;
+            foreach (var resource in resources)
+            {
+                ct.ThrowIfCancellationRequested();
+                result[resource.FilePath] = null;
 
-            if (string.IsNullOrWhiteSpace(current.ProjectId))
-            {
-                continue;
-            }
+                if (string.IsNullOrWhiteSpace(current.ProjectId))
+                {
+                    continue;
+                }
 
-            IReadOnlyList<ModrinthVersion> versions;
-            try
-            {
-                versions = await _modrinth
-                    .GetVersionsAsync(current.ProjectId, resource.Kind, gameVersion, loaderName, ct)
-                    .ConfigureAwait(false);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _log.Warn($"查询 Modrinth 项目版本失败：{current.ProjectId}", ex);
-                continue;
-            }
+                IReadOnlyList<ModrinthVersion> versions;
+                try
+                {
+                    versions = await _modrinth
+                        .GetVersionsAsync(current.ProjectId, resource.Kind, gameVersion, loaderName, ct)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _log.Warn($"查询 Modrinth 项目版本失败：{current.ProjectId}", ex);
+                    continue;
+                }
 
-            var latest = ModrinthService.PickBestVersion(versions, resource.Kind, loaderName);
-            if (latest is null
-                || latest.Id == current.Id
-                || latest.PublishedAt <= current.PublishedAt)
-            {
-                continue;
-            }
+                var latest = ModrinthService.PickBestVersion(versions, resource.Kind, loaderName);
+                if (latest is null
+                    || latest.Id == current.Id
+                    || latest.PublishedAt <= current.PublishedAt)
+                {
+                    continue;
+                }
 
-            var file = ModrinthService.ToResourceFile(latest, resource.Kind);
-            if (file is null || string.IsNullOrWhiteSpace(file.DownloadUrl))
-            {
-                continue;
-            }
+                var file = ModrinthService.ToResourceFile(latest, resource.Kind);
+                if (file is null || string.IsNullOrWhiteSpace(file.DownloadUrl))
+                {
+                    continue;
+                }
 
-            result[resource.FilePath] = new ResourceUpdateInfo
-            {
-                Resource = resource,
-                Source = ResourceSource.Modrinth,
-                File = file,
-                CurrentVersionText = resource.Version ?? CurrentVersionText(current),
-            };
+                result[resource.FilePath] = new ResourceUpdateInfo
+                {
+                    Resource = resource,
+                    Source = ResourceSource.Modrinth,
+                    File = file,
+                    CurrentVersionText = resource.Version ?? CurrentVersionText(current),
+                };
+            }
         }
 
         return result;
@@ -219,10 +232,21 @@ public sealed class ResourceUpdateService
     private static string CurrentVersionText(ModrinthVersion version) =>
         string.IsNullOrWhiteSpace(version.Name) ? version.VersionNumber : version.Name;
 
-    private static string ComputeSha1(string path)
+    /// <summary>分块计算 SHA-1，便于在大文件处理过程中及时响应取消。</summary>
+    private static string ComputeSha1(string path, CancellationToken ct)
     {
         using var stream = File.OpenRead(path);
-        return Convert.ToHexString(SHA1.HashData(stream)).ToLowerInvariant();
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA1);
+        var buffer = new byte[81920];
+
+        int read;
+        while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+        {
+            ct.ThrowIfCancellationRequested();
+            hash.AppendData(buffer, 0, read);
+        }
+
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
     }
 
     // ---------------------------------------------------------------- CurseForge
@@ -234,7 +258,8 @@ public sealed class ResourceUpdateService
         IProgress<string>? status,
         CancellationToken ct)
     {
-        var fingerprintMap = new Dictionary<uint, LocalResource>();
+        // 相同指纹可能对应多份本地文件，全部保留才能都算作已匹配。
+        var fingerprintMap = new Dictionary<uint, List<LocalResource>>();
         status?.Report("正在计算本地文件指纹…");
 
         foreach (var resource in files)
@@ -247,8 +272,14 @@ public sealed class ResourceUpdateService
                         ct)
                     .ConfigureAwait(false);
 
-                // 同一个文件不会出现两次；极小概率碰撞时保留第一个。
-                fingerprintMap.TryAdd(fingerprint, resource);
+                if (fingerprintMap.TryGetValue(fingerprint, out var sameFiles))
+                {
+                    sameFiles.Add(resource);
+                }
+                else
+                {
+                    fingerprintMap[fingerprint] = new List<LocalResource> { resource };
+                }
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
             {
@@ -278,12 +309,15 @@ public sealed class ResourceUpdateService
         {
             ct.ThrowIfCancellationRequested();
 
-            if (!fingerprintMap.TryGetValue(match.Fingerprint, out var resource))
+            if (!fingerprintMap.TryGetValue(match.Fingerprint, out var resources))
             {
                 continue;
             }
 
-            result[resource.FilePath] = null;
+            foreach (var resource in resources)
+            {
+                result[resource.FilePath] = null;
+            }
 
             IReadOnlyList<CurseForgeFile> filesForVersion;
             try
@@ -298,24 +332,29 @@ public sealed class ResourceUpdateService
                 continue;
             }
 
-            var latest = CurseForgeService.PickBestFile(filesForVersion, resource.Kind, loaderName)
-                         ?? CurseForgeService.PickBestFile(match.LatestFiles, resource.Kind, loaderName);
-
-            if (latest is null
-                || latest.Id == match.File.Id
-                || latest.FileDate < match.File.FileDate
-                || string.IsNullOrWhiteSpace(latest.DownloadUrl))
+            foreach (var resource in resources)
             {
-                continue;
+                ct.ThrowIfCancellationRequested();
+
+                var latest = CurseForgeService.PickBestFile(filesForVersion, resource.Kind, loaderName)
+                             ?? CurseForgeService.PickBestFile(match.LatestFiles, resource.Kind, loaderName);
+
+                if (latest is null
+                    || latest.Id == match.File.Id
+                    || latest.FileDate < match.File.FileDate
+                    || string.IsNullOrWhiteSpace(latest.DownloadUrl))
+                {
+                    continue;
+                }
+
+                result[resource.FilePath] = new ResourceUpdateInfo
+                {
+                    Resource = resource,
+                    Source = ResourceSource.CurseForge,
+                    File = ResourceFile.FromCurseForge(latest),
+                    CurrentVersionText = resource.Version ?? match.File.DisplayName,
+                };
             }
-
-            result[resource.FilePath] = new ResourceUpdateInfo
-            {
-                Resource = resource,
-                Source = ResourceSource.CurseForge,
-                File = ResourceFile.FromCurseForge(latest),
-                CurrentVersionText = resource.Version ?? match.File.DisplayName,
-            };
         }
 
         return result;

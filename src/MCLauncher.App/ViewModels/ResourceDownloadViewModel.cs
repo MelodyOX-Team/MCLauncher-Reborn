@@ -671,31 +671,45 @@ public sealed class ResourceDownloadViewModel : ViewModelBase
 
         try
         {
-            // 连续切换下拉时只让最后一次生效。
-            await Task.Delay(300, cts.Token).ConfigureAwait(true);
-        }
-        catch (OperationCanceledException)
-        {
-            return;
-        }
+            try
+            {
+                // 连续切换下拉时只让最后一次生效。
+                await Task.Delay(300, cts.Token).ConfigureAwait(true);
+            }
+            catch (OperationCanceledException)
+            {
+                return;
+            }
 
-        if (cts.IsCancellationRequested || !IsOpen)
-        {
-            return;
-        }
+            if (cts.IsCancellationRequested || !IsOpen)
+            {
+                return;
+            }
 
-        try
-        {
-            _pageIndex = 0;
-            await LoadPageAsync(0);
+            try
+            {
+                _pageIndex = 0;
+                await LoadPageAsync(0);
+            }
+            catch (OperationCanceledException)
+            {
+                // 新一轮检索取消上一次请求，属于正常流程。
+            }
+            catch (Exception ex)
+            {
+                AsyncCommandErrors.Report(ex);
+            }
         }
-        catch (OperationCanceledException)
+        finally
         {
-            // 新一轮检索取消上一次请求，属于正常流程。
-        }
-        catch (Exception ex)
-        {
-            AsyncCommandErrors.Report(ex);
+            // 每条筛选请求都在自己的 finally 里释放：先摘掉字段引用再 Dispose，
+            // 避免回收掉已属于新请求的 CTS。
+            if (ReferenceEquals(_filterReloadCts, cts))
+            {
+                _filterReloadCts = null;
+            }
+
+            cts.Dispose();
         }
     }
 
@@ -1109,6 +1123,11 @@ public sealed class ResourceDownloadViewModel : ViewModelBase
         IsVersionDialogOpen = false;
         IsFileNameDialogOpen = false;
 
+        // 这里会换掉 _detailCts，旧请求的 finally 因引用不匹配会跳过复位；
+        // 必须在替换前显式收尾，否则 IsBusy 会永久停在 true。
+        CancelDetailRequest();
+        IsBusy = false;
+
         if (_detailHistory.Count == 0)
         {
             ResetDetail();
@@ -1123,14 +1142,29 @@ public sealed class ResourceDownloadViewModel : ViewModelBase
         RenderVersions(snapshot.Versions);
         DetailStatusText = $"共 {snapshot.Versions.Count} 个版本，点击任意版本开始下载。";
 
-        _detailCts?.Cancel();
         var cts = new CancellationTokenSource();
         _detailCts = cts;
         _ = LoadDetailIconAsync(snapshot.Project.IconUrl, cts.Token);
     }
 
+    /// <summary>取消并释放当前详情请求；旧请求的 finally 不会复位共享状态，由调用方负责。</summary>
+    private void CancelDetailRequest()
+    {
+        var previous = _detailCts;
+        _detailCts = null;
+        if (previous is not null)
+        {
+            previous.Cancel();
+            previous.Dispose();
+        }
+    }
+
     private void ResetDetail()
     {
+        CancelDetailRequest();
+
+        // 检索页与详情页共用 IsBusy：旧请求已被放弃，必须显式清除忙碌状态。
+        IsBusy = false;
         _detailHistory.Clear();
         _currentDetail = null;
         RecommendedVersions.Clear();
@@ -1534,16 +1568,17 @@ public sealed class ResourceDownloadViewModel : ViewModelBase
         }
         finally
         {
+            // 只有当前请求才能复位共享状态：被新下载取消的旧请求不能清掉新任务的行与忙碌标记。
             if (ReferenceEquals(_downloadCts, cts))
             {
                 _downloadCts = null;
+                DownloadSpeedText = string.Empty;
+                _downloadRows.Clear();
+                IsBusy = false;
+                IsDownloading = false;
             }
 
-            DownloadSpeedText = string.Empty;
-            _downloadRows.Clear();
             cts.Dispose();
-            IsBusy = false;
-            IsDownloading = false;
         }
     }
 
@@ -1604,16 +1639,17 @@ public sealed class ResourceDownloadViewModel : ViewModelBase
         }
         finally
         {
+            // 只有当前请求才能复位共享状态：被新下载取消的旧请求不能清掉新任务的行与忙碌标记。
             if (ReferenceEquals(_downloadCts, cts))
             {
                 _downloadCts = null;
+                DownloadSpeedText = string.Empty;
+                _downloadRows.Clear();
+                IsBusy = false;
+                IsDownloading = false;
             }
 
-            DownloadSpeedText = string.Empty;
-            _downloadRows.Clear();
             cts.Dispose();
-            IsBusy = false;
-            IsDownloading = false;
         }
     }
 
@@ -1711,16 +1747,17 @@ public sealed class ResourceDownloadViewModel : ViewModelBase
         }
         finally
         {
+            // 只有当前请求才能复位共享状态：被新下载取消的旧请求不能清掉新任务的行与忙碌标记。
             if (ReferenceEquals(_downloadCts, cts))
             {
                 _downloadCts = null;
+                DownloadSpeedText = string.Empty;
+                _downloadRows.Clear();
+                IsBusy = false;
+                IsDownloading = false;
             }
 
-            DownloadSpeedText = string.Empty;
-            _downloadRows.Clear();
             cts.Dispose();
-            IsBusy = false;
-            IsDownloading = false;
         }
     }
 }

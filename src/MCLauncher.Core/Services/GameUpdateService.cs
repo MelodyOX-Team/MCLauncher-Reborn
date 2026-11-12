@@ -1,5 +1,6 @@
 using MCLauncher.Core.Abstractions;
 using MCLauncher.Core.Models;
+using MCLauncher.Core.Utils;
 
 namespace MCLauncher.Core.Services;
 
@@ -117,19 +118,29 @@ public sealed class GameUpdateService
         ResourceUpdateCheckResult mods;
         var modsFailed = false;
 
-        try
+        if (string.IsNullOrWhiteSpace(request.BaseVersionId))
         {
-            var resources = _resources.Scan(request.InstanceDirectory, ResourceKind.Mod);
-            mods = await _resourceUpdates
-                .CheckAsync(resources, request.BaseVersionId, request.LoaderName, preferredSource, status, ct)
-                .ConfigureAwait(false);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            _log.Warn("检查模组更新失败", ex);
-            status?.Report("模组更新检查失败：" + ex.Message);
+            // 实例没有记录原版版本时，接口会返回任意版本的最新文件，
+            // 把 1.21 的模组推给 1.20 实例，宁可不推荐。
+            status?.Report("实例未记录游戏版本，已跳过模组更新检查");
             mods = new ResourceUpdateCheckResult();
-            modsFailed = true;
+        }
+        else
+        {
+            try
+            {
+                var resources = _resources.Scan(request.InstanceDirectory, ResourceKind.Mod);
+                mods = await _resourceUpdates
+                    .CheckAsync(resources, request.BaseVersionId, request.LoaderName, preferredSource, status, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _log.Warn("检查模组更新失败", ex);
+                status?.Report("模组更新检查失败：" + ex.Message);
+                mods = new ResourceUpdateCheckResult();
+                modsFailed = true;
+            }
         }
 
         return new GameUpdateCheckResult
@@ -292,19 +303,61 @@ public sealed class GameUpdateService
         var merged = VersionResolver.Merge(baseVersion, loaderVersion);
         merged.Id = request.InstanceId;
         merged.Jar = request.InstanceId;
+
+        // 写入前先备份实例版本 JSON：依赖没补齐时要把实例还原成升级前的样子，
+        // 否则会留下一个指向半装加载器的版本配置。
+        var versionJsonPath = VersionRepository.VersionJsonPath(request.GameRoot, request.InstanceId);
+        var backupJson = File.Exists(versionJsonPath)
+            ? await File.ReadAllTextAsync(versionJsonPath, ct).ConfigureAwait(false)
+            : null;
+
         _repository.Save(request.GameRoot, merged);
 
-        var report = await _installer
-            .EnsureCompleteAsync(request.GameRoot, request.InstanceId, options, progress, ct)
-            .ConfigureAwait(false);
-
-        if (!report.Success)
+        try
         {
-            throw new InvalidOperationException(
-                $"加载器已写入，但依赖文件下载失败（{report.Failed} 个）");
+            var report = await _installer
+                .EnsureCompleteAsync(request.GameRoot, request.InstanceId, options, progress, ct)
+                .ConfigureAwait(false);
+
+            if (!report.Success)
+            {
+                throw new InvalidOperationException(
+                    $"加载器已写入，但依赖文件下载失败（{report.Failed} 个）");
+            }
+        }
+        catch
+        {
+            RestoreInstanceVersionJson(versionJsonPath, backupJson);
+            throw;
         }
 
         _log.Info($"实例 {request.InstanceId} 的加载器已原地升级到 {display} {targetVersion}");
+    }
+
+    /// <summary>把实例版本 JSON 还原成升级前的内容；升级前没有该文件时删除即可。</summary>
+    private void RestoreInstanceVersionJson(string path, string? backupJson)
+    {
+        try
+        {
+            if (backupJson is null)
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            else
+            {
+                PathUtil.EnsureParentDirectory(path);
+                File.WriteAllText(path, backupJson);
+            }
+
+            _log.Warn($"加载器升级失败，已恢复实例版本 JSON：{path}");
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _log.Error($"恢复实例版本 JSON 失败，请手动还原：{path}", ex);
+        }
     }
 
     /// <summary>逐个替换选中的模组文件，返回成功更新的数量。</summary>

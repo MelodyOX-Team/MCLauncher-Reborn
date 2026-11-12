@@ -69,6 +69,7 @@ public sealed class VersionManifestEntry
     private static readonly HashSet<string> KnownAprilFoolsIds = new(StringComparer.OrdinalIgnoreCase)
     {
         "20w14infinite",            // 2020 无限愚人节
+        "15w14a",                   // 2015 爱之拥抱愚人节（清单里 type=snapshot）
         "3D Shareware v1.34",       // 2019 年愚人节
         "23w13a_or_b",              // 2023 投票愚人节
         "1.RV-Pre1",                // 2018 愚人节

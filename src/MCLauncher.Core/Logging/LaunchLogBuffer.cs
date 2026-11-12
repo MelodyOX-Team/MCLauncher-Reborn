@@ -29,6 +29,12 @@ public sealed class LaunchLogBuffer
 
     public int Capacity => _capacity;
 
+    /// <summary>
+    /// 启动代次：每调用一次 <see cref="Clear"/> 加一。界面在启动之后才第一次创建时
+    /// 可以据此判断"本次启动已经开始"，从而不再去读上一次的 latest.log。
+    /// </summary>
+    public int Generation { get; private set; }
+
     public void Append(string line)
     {
         if (line is null)
@@ -60,6 +66,7 @@ public sealed class LaunchLogBuffer
         lock (_gate)
         {
             _lines.Clear();
+            Generation++;
         }
 
         try

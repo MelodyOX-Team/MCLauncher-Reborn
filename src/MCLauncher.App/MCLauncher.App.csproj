@@ -14,8 +14,9 @@
   <!-- exe 属性面板里「详细信息」页签展示的元数据 -->
   <PropertyGroup>
     <Version>6.0.0</Version>
-    <AssemblyVersion>6.0.0.0</AssemblyVersion>
-    <FileVersion>6.0.0.0</FileVersion>
+    <!-- 由 Version 派生，避免只改 Version 时程序集版本仍是旧值、更新检查反复提示 -->
+    <AssemblyVersion>$(Version)</AssemblyVersion>
+    <FileVersion>$(Version)</FileVersion>
     <!-- 默认会把 git 提交哈希拼到产品版本后面（形如 1.0.0+c4dc8fb72...），关掉 -->
     <IncludeSourceRevisionInInformationalVersion>false</IncludeSourceRevisionInInformationalVersion>
     <AssemblyTitle>MineCraft Launcher 6.0 Reborn</AssemblyTitle>

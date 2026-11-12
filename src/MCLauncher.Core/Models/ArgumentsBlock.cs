@@ -10,11 +10,24 @@ namespace MCLauncher.Core.Models;
 /// </summary>
 public sealed class ArgumentsBlock
 {
+    private List<ArgumentEntry> _game = new();
+    private List<ArgumentEntry> _jvm = new();
+
+    // setter 兜底 null：JSON 里出现 "game": null 时反序列化会直接调用 setter，
+    // 非空声明的默认值挡不住它，下游所有 .Count / AddRange 都会 NullReference。
     [JsonPropertyName("game")]
-    public List<ArgumentEntry> Game { get; set; } = new();
+    public List<ArgumentEntry> Game
+    {
+        get => _game;
+        set => _game = value ?? new();
+    }
 
     [JsonPropertyName("jvm")]
-    public List<ArgumentEntry> Jvm { get; set; } = new();
+    public List<ArgumentEntry> Jvm
+    {
+        get => _jvm;
+        set => _jvm = value ?? new();
+    }
 }
 
 /// <summary>

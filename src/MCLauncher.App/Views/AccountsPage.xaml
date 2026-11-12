@@ -347,11 +347,11 @@
                               SelectedItem="{Binding SelectedAccountItem, Mode=TwoWay}"
                               SelectionMode="Single"
                               Background="Transparent" BorderThickness="0"
-                              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                              ScrollViewer.HorizontalScrollBarVisibility="Auto"
                               ItemContainerStyle="{StaticResource AccountRowStyle}">
                         <ListView.View>
                             <GridView AllowsColumnReorder="False">
-                                <GridViewColumn Header="头像" Width="64">
+                                <GridViewColumn Header="头像" Width="52">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <Border Width="32" Height="32" Margin="10,4,0,4">
@@ -363,7 +363,7 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Header="游戏ID" Width="150">
+                                <GridViewColumn Header="游戏ID" Width="130">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding GameId}" Margin="10,0"
@@ -372,7 +372,7 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Header="Xbox用户名" Width="140">
+                                <GridViewColumn Header="Xbox用户名" Width="110">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding XboxName}" Margin="10,0"
@@ -381,7 +381,7 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Header="账号类型" Width="100">
+                                <GridViewColumn Header="账号类型" Width="78">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding AccountTypeText}" Margin="10,0"
@@ -389,7 +389,7 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Header="√（当前）" Width="80">
+                                <GridViewColumn Header="当前" Width="56">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <TextBlock Text="{Binding CurrentMark}" Margin="10,0"
@@ -399,7 +399,7 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Width="52">
+                                <GridViewColumn Width="42">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <Button Style="{StaticResource AccountIconButton}"

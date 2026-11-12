@@ -361,7 +361,7 @@ public sealed class ZuluJavaService
 
                 return JsonSerializer.Deserialize<T>(json);
             }
-            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException or JsonException)
+            catch (Exception ex) when (ex is HttpRequestException or HttpApiException or TaskCanceledException or JsonException)
             {
                 last = ex;
                 if (attempt < ApiAttempts)

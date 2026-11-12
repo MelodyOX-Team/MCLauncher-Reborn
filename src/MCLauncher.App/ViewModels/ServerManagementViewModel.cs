@@ -232,6 +232,11 @@ public sealed class ServerManagementViewModel : ViewModelBase
     /// <summary>切换实例时重新读取 servers.dat。</summary>
     public void Show(string versionId, string instanceDirectory)
     {
+        // 切实例前先把上一个实例的编辑落盘：否则防抖计时器稍后会把旧列表写进新实例，
+        // 旧实例的改动也会丢失（FlushPendingSave 内部会停止计时器）。
+        FlushPendingSave();
+        _saveTimer.Stop();
+
         _instanceId = versionId;
         _instanceDirectory = instanceDirectory;
 

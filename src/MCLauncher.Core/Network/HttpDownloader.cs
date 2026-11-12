@@ -358,6 +358,14 @@ public sealed class HttpDownloader : IDisposable
                 {
                     throw;
                 }
+                catch (HttpRequestException ex) when (IsPermanentClientError(ex))
+                {
+                    // 404 / 403 / 401 这类永久性客户端错误重试没有意义，直接换下一个候选源。
+                    lastError = ex;
+                    _log.Info(
+                        $"下载失败（{candidate.SourceName}，HTTP {ex.StatusCode}，不再重试，文件 {Path.GetFileName(targetPath)}）");
+                    break;
+                }
                 catch (Exception ex)
                 {
                     lastError = ex;
@@ -422,7 +430,9 @@ public sealed class HttpDownloader : IDisposable
 
             if (response.StatusCode is not HttpStatusCode.OK and not HttpStatusCode.PartialContent)
             {
-                throw new HttpRequestException($"HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
+                // 带上状态码，外层才能识别永久性的 4xx 并跳过无意义的重试。
+                throw new HttpRequestException(
+                    $"HTTP {(int)response.StatusCode} {response.ReasonPhrase}", null, response.StatusCode);
             }
 
             // 206 必须从本地已有长度处继续，否则拼接出来的文件是错的。
@@ -449,6 +459,7 @@ public sealed class HttpDownloader : IDisposable
             var contentLength = response.Content.Headers.ContentLength;
             var totalBytes = contentLength is { } len ? len + existing : -1;
 
+            long received;
             await using (var httpStream = await response.Content.ReadAsStreamAsync(ct).ConfigureAwait(false))
             await using (var fileStream = new FileStream(
                              partPath,
@@ -458,8 +469,16 @@ public sealed class HttpDownloader : IDisposable
                              BufferSize,
                              FileOptions.Asynchronous))
             {
-                await CopyWithProgressAsync(httpStream, fileStream, existing, totalBytes, progress, ct).ConfigureAwait(false);
+                received = await CopyWithProgressAsync(httpStream, fileStream, existing, totalBytes, progress, ct).ConfigureAwait(false);
                 await fileStream.FlushAsync(ct).ConfigureAwait(false);
+            }
+
+            // 对端可能在响应体传完前就关闭连接；总长度已知时必须确认收全，
+            // 否则截断的文件会被 ExistenceOnly 当成下载成功。
+            if (totalBytes >= 0 && received != totalBytes)
+            {
+                TryDelete(partPath);
+                throw new InvalidDataException($"下载不完整：期望 {totalBytes} 字节，实际收到 {received} 字节");
             }
         }
 
@@ -474,7 +493,7 @@ public sealed class HttpDownloader : IDisposable
         progress?.Report(new DownloadProgress(File.Exists(targetPath) ? new FileInfo(targetPath).Length : 0, checker.Size));
     }
 
-    private async Task CopyWithProgressAsync(
+    private async Task<long> CopyWithProgressAsync(
         Stream source,
         Stream destination,
         long alreadyBytes,
@@ -512,6 +531,7 @@ public sealed class HttpDownloader : IDisposable
             }
 
             progress?.Report(new DownloadProgress(received, totalBytes));
+            return received;
         }
         finally
         {

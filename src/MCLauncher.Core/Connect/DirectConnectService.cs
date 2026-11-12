@@ -163,6 +163,7 @@ public sealed class DirectConnectService : IDisposable
         await _gate.WaitAsync(ct).ConfigureAwait(false);
 
         LocalTcpForwarder? forwarder = null;
+        var mappings = new List<Mapping>();
 
         try
         {
@@ -191,7 +192,6 @@ public sealed class DirectConnectService : IDisposable
 
             var messages = new List<string>(network.Messages);
             var endpoints = new List<DirectEndpoint>();
-            var mappings = new List<Mapping>();
 
             if (request.UseUpnp)
             {
@@ -299,6 +299,24 @@ public sealed class DirectConnectService : IDisposable
         }
         catch
         {
+            // 映射建立后若后续步骤失败（例如手动填写的公网地址无效），
+            // 要立刻逐个删除已建立的映射，不能等 5 分钟租约到期才释放端口。
+            foreach (var mapping in mappings)
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    await mapping.Gateway
+                        .DeletePortMappingAsync(mapping.Port, cts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException
+                                               or OperationCanceledException or IOException)
+                {
+                    _log.Warn("回滚 UPnP 映射失败，租约到期后会自动失效", ex);
+                }
+            }
+
             if (forwarder is not null)
             {
                 await forwarder.DisposeAsync().ConfigureAwait(false);
@@ -406,6 +424,7 @@ public sealed class DirectConnectService : IDisposable
     private async Task MonitorAsync(Session session)
     {
         var lastRenew = DateTimeOffset.UtcNow;
+        var probeFailures = 0;
 
         while (!session.Monitor.IsCancellationRequested)
         {
@@ -429,9 +448,19 @@ public sealed class DirectConnectService : IDisposable
 
             if (!alive)
             {
+                // 单次探测失败可能只是游戏短暂卡顿（GC、加载区块），
+                // 连续两次都失败才判定世界已关闭，避免误拆房间。
+                probeFailures++;
+                if (probeFailures < 2)
+                {
+                    continue;
+                }
+
                 await StopHostAsync("本机世界已关闭，房间与端口映射已停止。").ConfigureAwait(false);
                 return;
             }
+
+            probeFailures = 0;
 
             if (DateTimeOffset.UtcNow - lastRenew < MappingRenewInterval)
             {
@@ -453,6 +482,10 @@ public sealed class DirectConnectService : IDisposable
                             session.Monitor.Token)
                         .ConfigureAwait(false);
                 }
+                catch (InvalidOperationException ex) when (IsMappingConflict(ex))
+                {
+                    // 路由器报 718（ConflictInMappingEntry）：映射已存在，视为续租成功。
+                }
                 catch (Exception ex) when (ex is InvalidOperationException or HttpRequestException
                                                or OperationCanceledException or IOException)
                 {
@@ -461,6 +494,14 @@ public sealed class DirectConnectService : IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// UPnP 错误 718 / ConflictInMappingEntry：相同外部端口已有映射。
+    /// 续租场景下这说明目标映射已经存在，可直接按成功处理。
+    /// </summary>
+    private static bool IsMappingConflict(Exception ex) =>
+        ex.Message.Contains("ConflictInMappingEntry", StringComparison.OrdinalIgnoreCase)
+        || ex.Message.Contains("UPnP 错误 718", StringComparison.OrdinalIgnoreCase);
 
     private void AddMessage(Session session, string message)
     {
@@ -554,8 +595,6 @@ public sealed class DirectConnectService : IDisposable
             return null;
         }
 
-        string? fallback = null;
-
         foreach (var networkInterface in NetworkInterface.GetAllNetworkInterfaces())
         {
             if (networkInterface.OperationalStatus != OperationalStatus.Up)
@@ -571,8 +610,6 @@ public sealed class DirectConnectService : IDisposable
                 {
                     continue;
                 }
-
-                fallback ??= unicast.Address.ToString();
 
                 var local = unicast.Address.GetAddressBytes();
                 var mask = unicast.IPv4Mask.GetAddressBytes();
@@ -600,7 +637,9 @@ public sealed class DirectConnectService : IDisposable
             }
         }
 
-        return fallback;
+        // 没有同网段地址时返回 null，由调用方跳过该网关；
+        // 用其它网卡的地址建映射只会得到一条并不可达的“成功”记录。
+        return null;
     }
 
     private static string? NormalizeLoader(string? loader)

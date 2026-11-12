@@ -27,7 +27,9 @@ public sealed class GameLaunchLiveTests
         var java = stack.Java.Detect(ct: cts.Token).FirstOrDefault(j => j.MajorVersion >= 8);
         if (java is null)
         {
-            return; // 机器上没有可用的 64 位 Java 时跳过
+            // 机器上没有可用的 64 位 Java 时跳过。项目用的 xunit 2.9.3 没有 Assert.Skip
+            // （动态跳过是 v3 的能力），也没有引入跳过相关的扩展包，只能直接返回。
+            return;
         }
 
         const string versionId = "1.13.2";

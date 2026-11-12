@@ -17,22 +17,29 @@ internal static class AccountsVaultCrypto
     public static AccountsVault Seal(IReadOnlyList<Account> accounts, Action<string>? onTpmFailure = null)
     {
         var dataKey = RandomNumberGenerator.GetBytes(32);
-        var payload = AesGcmBox.Wrap(dataKey, Encoding.UTF8.GetBytes(JsonUtil.Serialize(accounts.ToList())));
-
-        var inner = LauncherKey.Wrap(dataKey);
-
-        // TPM 不可用时这里会自动降级为 DPAPI；DPAPI 也不可用则抛出，
-        // 由上层拒绝保存（不允许写出弱保护或明文凭据）。
-        var machine = MachineKey.Wrap(inner, onTpmFailure);
-        CryptographicOperations.ZeroMemory(dataKey);
-
-        return new AccountsVault
+        try
         {
-            Protector = machine.Protector,
-            MachineKey = machine.KeyBlob,
-            Outer = Convert.ToBase64String(machine.Wrapped),
-            Payload = Convert.ToBase64String(payload),
-        };
+            var payload = AesGcmBox.Wrap(dataKey, Encoding.UTF8.GetBytes(JsonUtil.Serialize(accounts.ToList())));
+
+            var inner = LauncherKey.Wrap(dataKey);
+
+            // TPM 不可用时这里会自动降级为 DPAPI；DPAPI 也不可用则抛出，
+            // 由上层拒绝保存（不允许写出弱保护或明文凭据）。
+            var machine = MachineKey.Wrap(inner, onTpmFailure);
+
+            return new AccountsVault
+            {
+                Protector = machine.Protector,
+                MachineKey = machine.KeyBlob,
+                Outer = Convert.ToBase64String(machine.Wrapped),
+                Payload = Convert.ToBase64String(payload),
+            };
+        }
+        finally
+        {
+            // 中间任何一步抛异常（例如 TPM/DPAPI 不可用）时也必须销毁明文数据密钥。
+            CryptographicOperations.ZeroMemory(dataKey);
+        }
     }
 
     public static IReadOnlyList<Account> Open(AccountsVault vault) => Open(vault, out _);
@@ -44,28 +51,44 @@ internal static class AccountsVaultCrypto
     public static IReadOnlyList<Account> Open(AccountsVault vault, out bool migratedFromLegacy)
     {
         migratedFromLegacy = false;
-        byte[] inner;
+        byte[]? inner = null;
+        byte[]? dataKey = null;
 
         try
         {
-            inner = MachineKey.Unwrap(
-                vault.Protector, vault.MachineKey, Convert.FromBase64String(vault.Outer));
+            try
+            {
+                inner = MachineKey.Unwrap(
+                    vault.Protector, vault.MachineKey, Convert.FromBase64String(vault.Outer));
+            }
+            catch (Exception) when (vault.LegacyMachineKeyFallback is not null && vault.LegacyOuterFallback is not null)
+            {
+                // 旧版在 TPM 模式额外写过一份 DPAPI 备份。这里只做一次性兼容读取，
+                // 解出后由 AccountStore 立刻按新格式重写，新文件不会再写入这条旁路。
+                inner = MachineKey.Unwrap(
+                    "dpapi",
+                    vault.LegacyMachineKeyFallback,
+                    Convert.FromBase64String(vault.LegacyOuterFallback));
+                migratedFromLegacy = true;
+            }
+
+            dataKey = LauncherKey.Unwrap(inner!);
+            var json = AesGcmBox.Unwrap(dataKey, Convert.FromBase64String(vault.Payload));
+
+            return JsonUtil.Deserialize<List<Account>>(Encoding.UTF8.GetString(json)) ?? new List<Account>();
         }
-        catch (Exception) when (vault.LegacyMachineKeyFallback is not null && vault.LegacyOuterFallback is not null)
+        finally
         {
-            // 旧版在 TPM 模式额外写过一份 DPAPI 备份。这里只做一次性兼容读取，
-            // 解出后由 AccountStore 立刻按新格式重写，新文件不会再写入这条旁路。
-            inner = MachineKey.Unwrap(
-                "dpapi",
-                vault.LegacyMachineKeyFallback,
-                Convert.FromBase64String(vault.LegacyOuterFallback));
-            migratedFromLegacy = true;
+            // 解密失败（例如密钥不匹配抛异常）时同样要清零，避免明文密钥留在堆上。
+            if (dataKey is not null)
+            {
+                CryptographicOperations.ZeroMemory(dataKey);
+            }
+
+            if (inner is not null)
+            {
+                CryptographicOperations.ZeroMemory(inner);
+            }
         }
-
-        var dataKey = LauncherKey.Unwrap(inner);
-        var json = AesGcmBox.Unwrap(dataKey, Convert.FromBase64String(vault.Payload));
-        CryptographicOperations.ZeroMemory(dataKey);
-
-        return JsonUtil.Deserialize<List<Account>>(Encoding.UTF8.GetString(json)) ?? new List<Account>();
     }
 }

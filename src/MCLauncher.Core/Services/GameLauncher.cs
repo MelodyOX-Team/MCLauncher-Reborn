@@ -86,10 +86,18 @@ public sealed class GameLauncher
         _log.Info($"启动游戏：{command.JavaPath}（工作目录 {command.WorkingDirectory}）");
         _log.Trace(command.ToSafeDisplayString());
 
-        if (!process.Start())
+        try
         {
+            if (!process.Start())
+            {
+                throw new InvalidOperationException($"无法启动 Java 进程：{command.JavaPath}");
+            }
+        }
+        catch
+        {
+            // Start 失败时进程对象已经创建，必须释放它持有的句柄。
             process.Dispose();
-            throw new InvalidOperationException($"无法启动 Java 进程：{command.JavaPath}");
+            throw;
         }
 
         ApplyPriority(process, command.Priority);

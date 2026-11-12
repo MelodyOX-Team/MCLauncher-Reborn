@@ -109,20 +109,25 @@
             <RowDefinition Height="*"/>
         </Grid.RowDefinitions>
 
-        <!-- ===== 头部 ===== -->
+        <!-- ===== 头部：左右分两列，避免窄窗口下副标题压到标题上 ===== -->
         <Grid Grid.Row="0">
-            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center">
                 <Button Style="{StaticResource SkinButton}" Command="{Binding BackCommand}"
                         Content="← 返回实例列表" Width="112" Height="26" FontSize="12"
                         Margin="0,0,12,0"/>
                 <TextBlock Text="实例管理" Style="{StaticResource PageTitle}"/>
                 <TextBlock Text="{Binding InstanceDisplay}" FontSize="15" FontWeight="SemiBold"
                            Foreground="#2F6FB6" Margin="10,0,0,0" VerticalAlignment="Center"
-                           TextTrimming="CharacterEllipsis" MaxWidth="320"/>
+                           TextTrimming="CharacterEllipsis" MaxWidth="240"/>
             </StackPanel>
-            <TextBlock HorizontalAlignment="Right" VerticalAlignment="Center"
+            <TextBlock Grid.Column="1" HorizontalAlignment="Right" VerticalAlignment="Center"
+                       Margin="12,0,0,0"
                        Text="{Binding InstanceSubtitle}" FontSize="11" Foreground="#7A7A7A"
-                       TextTrimming="CharacterEllipsis" MaxWidth="360"/>
+                       TextTrimming="CharacterEllipsis" MaxWidth="200"/>
         </Grid>
 
         <!-- ===== 主体 ===== -->

@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text;
+using System.Text.Json;
 using MCLauncher.Core.Connect;
 using MCLauncher.Core.Logging;
 using MCLauncher.Core.Models;
@@ -353,24 +354,17 @@ public sealed class LauncherStack : IDisposable
             }
 
             // 合并继承链得到自洽的 merged JSON（含 arguments / libraries 的完整叠加），
-            // 同时拿到 chain 的最后一层——原版 JSON——它的 id 是原版版本号候选。
+            // 原版版本号由 ResolveBaseVersionId 从 merged 里推断。
             GameVersionJson merged;
-            string? vanillaIdFromChain = null;
             try
             {
                 merged = Repository.Resolve(gameRoot, id);
-                vanillaIdFromChain = merged.InheritsFrom is null && merged.Id is { Length: > 0 }
-                    ? merged.Id  // 自洽实例：merged.Id 是 leaf id，没有 inheritsFrom，原版版本号藏在 arguments/libraries/chain 末尾 JSON 里
-                    : null;
-
-                // Resolve 内部 BuildChain 返回的 chain 顺序是 leaf → root，取最后一个 JSON 的 Id
-                // （root 通常是原版，自洽实例除外：自洽实例 chain 长度为 1，leaf 就是自洽版本）
-                // 我们这里不用再调用 BuildChain 了——改用 FlattenGameArgs 直接扫 merged 的 arguments。
-                _ = vanillaIdFromChain; // 占位，ResolveBaseVersionId 会从 chain 最后一层推断
             }
-            catch (InvalidDataException)
+            catch (Exception ex) when (ex is InvalidDataException or IOException or JsonException)
             {
-                // 继承链坏了（父版本不存在），退化为只扫 leaf
+                // 单个实例的继承链或 JSON 损坏时退化为只扫 leaf，
+                // 否则一个坏实例会让整个实例列表加载失败。
+                Log.Warn($"解析实例 {id} 的版本文件失败，已退化为只读取 leaf", ex);
                 merged = leaf;
             }
 

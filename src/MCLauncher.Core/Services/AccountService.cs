@@ -17,6 +17,12 @@ public sealed class AccountService
     private readonly AccountStore _store;
     private readonly ILogger _log;
 
+    /// <summary>
+    /// 账号列表会被后台线程（账号健康检查）和 UI 线程同时读写，
+    /// 所有对 <c>_store.Items</c> 的访问都必须在这把锁内完成。
+    /// </summary>
+    private readonly object _gate = new();
+
     public AccountService(ConfigService config, ILogger log)
     {
         _config = config;
@@ -25,26 +31,39 @@ public sealed class AccountService
         _store.Load();
     }
 
-    /// <summary>全部账号（离线 + 微软）。</summary>
-    public IReadOnlyList<Account> Accounts => _store.Accounts;
+    /// <summary>全部账号的快照（离线 + 微软）。遍历期间不受后台刷新影响。</summary>
+    public IReadOnlyList<Account> Accounts
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _store.Accounts.ToArray();
+            }
+        }
+    }
 
     /// <summary>当前选中账号；失效账号会被跳过，没有可用账号时返回 null（上层应引导创建）。</summary>
     public Account? Selected
     {
         get
         {
-            var uuid = _config.Settings.SelectedAccountUuid;
-
-            if (!string.IsNullOrWhiteSpace(uuid))
+            lock (_gate)
             {
-                var match = _store.Accounts.FirstOrDefault(a => a.Uuid == uuid);
-                if (match is not null && !match.IsDisabled)
-                {
-                    return match;
-                }
-            }
+                var uuid = _config.Settings.SelectedAccountUuid;
 
-            return _store.Accounts.FirstOrDefault(a => !a.IsDisabled);
+                if (!string.IsNullOrWhiteSpace(uuid))
+                {
+                    var match = _store.Accounts.FirstOrDefault(
+                        a => string.Equals(a.Uuid, uuid, StringComparison.OrdinalIgnoreCase));
+                    if (match is not null && !match.IsDisabled)
+                    {
+                        return match;
+                    }
+                }
+
+                return _store.Accounts.FirstOrDefault(a => !a.IsDisabled);
+            }
         }
     }
 
@@ -62,69 +81,118 @@ public sealed class AccountService
             throw new ArgumentException("玩家名不能超过 16 个字符", nameof(name));
         }
 
-        var uuid = HashUtil.OfflinePlayerUuid(trimmed);
-        var existing = _store.Accounts.FirstOrDefault(a => a.Uuid == uuid);
-        if (existing is not null)
+        lock (_gate)
         {
-            Select(existing);
-            return existing;
-        }
+            var uuid = HashUtil.OfflinePlayerUuid(trimmed);
+            var existing = _store.Accounts.FirstOrDefault(a => a.Uuid == uuid);
+            if (existing is not null)
+            {
+                Select(existing);
+                return existing;
+            }
 
-        var account = Account.CreateOffline(trimmed, uuid);
-        _store.Items.Add(account);
-        _config.Settings.SelectedAccountUuid = account.Uuid;
-        PersistOrThrow();
-        _log.Info($"已添加离线账号：{account.Name}");
-        return account;
+            var account = Account.CreateOffline(trimmed, uuid);
+            _store.Items.Add(account);
+            var previousSelected = _config.Settings.SelectedAccountUuid;
+            _config.Settings.SelectedAccountUuid = account.Uuid;
+
+            try
+            {
+                PersistOrThrow();
+            }
+            catch
+            {
+                // 保存失败必须回滚，否则"拒绝登录"只在界面上生效，内存里仍留下未落盘的账号。
+                _store.Items.Remove(account);
+                _config.Settings.SelectedAccountUuid = previousSelected;
+                throw;
+            }
+
+            _log.Info($"已添加离线账号：{account.Name}");
+            return account;
+        }
     }
 
     /// <summary>保存（或替换）一个账号，通常由微软登录成功后调用。</summary>
     public void Upsert(Account account)
     {
-        var index = _store.Items.FindIndex(a => a.Uuid == account.Uuid);
-        if (index >= 0)
+        lock (_gate)
         {
-            _store.Items[index] = account;
-        }
-        else
-        {
-            _store.Items.Add(account);
-        }
+            var index = _store.Items.FindIndex(a => a.Uuid == account.Uuid);
+            var previous = index >= 0 ? _store.Items[index] : null;
+            if (index >= 0)
+            {
+                _store.Items[index] = account;
+            }
+            else
+            {
+                _store.Items.Add(account);
+            }
 
-        _config.Settings.SelectedAccountUuid = account.Uuid;
-        PersistOrThrow();
+            var previousSelected = _config.Settings.SelectedAccountUuid;
+            _config.Settings.SelectedAccountUuid = account.Uuid;
+
+            try
+            {
+                PersistOrThrow();
+            }
+            catch
+            {
+                if (index >= 0)
+                {
+                    _store.Items[index] = previous!;
+                }
+                else
+                {
+                    _store.Items.Remove(account);
+                }
+
+                _config.Settings.SelectedAccountUuid = previousSelected;
+                throw;
+            }
+        }
     }
 
     public void Select(Account account)
     {
-        _config.Settings.SelectedAccountUuid = account.Uuid;
-        _config.Save();
+        lock (_gate)
+        {
+            _config.Settings.SelectedAccountUuid = account.Uuid;
+            _config.Save();
+        }
+
         _log.Info($"已切换账号：{account}");
     }
 
     /// <summary>用新的账号数据替换同 UUID 的记录（刷新令牌/档案后调用），不改变「当前账号」。</summary>
     public void Update(Account account)
     {
-        var index = _store.Items.FindIndex(a => a.Uuid == account.Uuid);
-        if (index >= 0)
+        lock (_gate)
         {
-            _store.Items[index] = account;
-        }
-        else
-        {
-            _store.Items.Add(account);
-        }
+            var index = _store.Items.FindIndex(a => a.Uuid == account.Uuid);
+            if (index >= 0)
+            {
+                _store.Items[index] = account;
+            }
+            else
+            {
+                _store.Items.Add(account);
+            }
 
-        Persist();
+            Persist();
+        }
     }
 
     /// <summary>标记账号是否失效；失效账号会被 <see cref="Selected"/> 跳过，并禁止设为当前。</summary>
     public void SetDisabled(Account account, bool disabled, string? reason = null)
     {
-        var target = _store.Items.Find(a => a.Uuid == account.Uuid) ?? account;
-        target.IsDisabled = disabled;
-        target.DisabledReason = disabled ? reason : null;
-        Persist();
+        lock (_gate)
+        {
+            var target = _store.Items.Find(a => a.Uuid == account.Uuid) ?? account;
+            target.IsDisabled = disabled;
+            target.DisabledReason = disabled ? reason : null;
+            Persist();
+        }
 
         _log.Info(disabled
             ? $"账号已标记为失效：{account.Name}（{reason}）"
@@ -133,18 +201,23 @@ public sealed class AccountService
 
     public bool Remove(Account account)
     {
-        var removed = _store.Items.RemoveAll(a => a.Uuid == account.Uuid) > 0;
-        if (!removed)
+        lock (_gate)
         {
-            return false;
+            var removed = _store.Items.RemoveAll(a => a.Uuid == account.Uuid) > 0;
+            if (!removed)
+            {
+                return false;
+            }
+
+            if (string.Equals(
+                    _config.Settings.SelectedAccountUuid, account.Uuid, StringComparison.OrdinalIgnoreCase))
+            {
+                _config.Settings.SelectedAccountUuid = _store.Accounts.FirstOrDefault()?.Uuid;
+            }
+
+            Persist();
         }
 
-        if (_config.Settings.SelectedAccountUuid == account.Uuid)
-        {
-            _config.Settings.SelectedAccountUuid = _store.Accounts.FirstOrDefault()?.Uuid;
-        }
-
-        Persist();
         _log.Info($"已删除账号：{account.Name}");
         return true;
     }
@@ -153,7 +226,13 @@ public sealed class AccountService
     /// 销毁本地账号凭据：删除加密的 accounts.json、清空当前账号、释放 TPM/DPAPI 本机密钥。
     /// 不可恢复，调用方应先向用户确认。
     /// </summary>
-    public bool PurgeAllAccounts(bool releaseMachineKey = true) => _store.Purge(releaseMachineKey);
+    public bool PurgeAllAccounts(bool releaseMachineKey = true)
+    {
+        lock (_gate)
+        {
+            return _store.Purge(releaseMachineKey);
+        }
+    }
 
     /// <summary>账号列表与当前选择一起落盘（账号到 accounts.json，选择到 settings.json）。</summary>
     private void Persist()

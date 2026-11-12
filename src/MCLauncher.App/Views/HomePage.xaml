@@ -54,9 +54,9 @@
             </StackPanel>
         </Border>
 
-        <!-- 启动输出：点击启动后才出现，进度条在这块下面 -->
-        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center"
-                    Margin="0,0,0,120" Width="560"
+        <!-- 启动输出：点击启动后才出现，固定在底部，避免与左上角公告在默认窗口尺寸下重叠 -->
+        <StackPanel HorizontalAlignment="Center" VerticalAlignment="Bottom"
+                    Margin="16,0,16,20" Width="560" MaxHeight="330"
                     Visibility="{Binding HasLaunchOutput, Converter={StaticResource BoolToVis}}">
             <Border CornerRadius="8" Padding="10,8">
                 <Border.Style>

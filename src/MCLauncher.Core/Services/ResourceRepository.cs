@@ -67,72 +67,82 @@ public sealed class ResourceRepository
 
         var result = new List<LocalResource>();
 
-        try
+        // 单个文件在扫描期间被删除或占用时跳过并记录；整类扫描失败则让异常向上抛，
+        // 由界面统一清空列表，避免把残缺结果当成完整列表展示。
+        void Add(string itemPath, bool isDirectory)
         {
-            if (IsDirectoryKind(kind))
+            var resource = Build(kind, itemPath, isDirectory);
+            if (resource is not null)
             {
-                // 目录型：既支持"目录形式"（存档、解压过的资源包），也支持"压缩包形式"。
-                foreach (var dir in Directory.EnumerateDirectories(directory))
-                {
-                    var name = Path.GetFileName(dir);
-                    if (name.StartsWith('.') || name.Equals("debug", StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    result.Add(Build(kind, dir, isDirectory: true));
-                }
+                result.Add(resource);
             }
+        }
 
-            var patterns = kind switch
+        if (IsDirectoryKind(kind))
+        {
+            // 目录型：既支持"目录形式"（存档、解压过的资源包），也支持"压缩包形式"。
+            foreach (var dir in Directory.EnumerateDirectories(directory))
             {
-                ResourceKind.Mod => new[] { "*.jar" },
-                // 原理图有多种格式：Litematica / WorldEdit / Sponge / 原版结构。
-                ResourceKind.Schematic => new[] { "*.litematic", "*.schematic", "*.schem", "*.nbt" },
-                _ => new[] { "*.zip" },
-            };
-
-            foreach (var pattern in patterns)
-            {
-                foreach (var file in Directory.EnumerateFiles(directory, pattern))
-                {
-                    result.Add(Build(kind, file, isDirectory: false));
-                }
-            }
-
-            if (kind == ResourceKind.ResourcePack || kind == ResourceKind.Datapack)
-            {
-                foreach (var file in Directory.EnumerateFiles(directory, "*.mcpack"))
-                {
-                    result.Add(Build(kind, file, isDirectory: false));
-                }
-            }
-
-            // 禁用项：Mod 是 *.jar.disabled；目录型是目录名带后缀。
-            foreach (var file in Directory.EnumerateFiles(directory, "*" + DisabledSuffix))
-            {
-                if (!file.EndsWith(".jar" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
-                    && !file.EndsWith(".zip" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
-                    && !file.EndsWith(".mcpack" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
-                    && !file.EndsWith(".litematic" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
-                    && !file.EndsWith(".schematic" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
-                    && !file.EndsWith(".schem" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
-                    && !file.EndsWith(".nbt" + DisabledSuffix, StringComparison.OrdinalIgnoreCase))
+                var name = Path.GetFileName(dir);
+                if (name.StartsWith('.') || name.Equals("debug", StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
 
-                result.Add(Build(kind, file, isDirectory: false));
-            }
+                // 禁用目录在下面的循环统一收集，这里跳过避免同一目录出现两次。
+                if (name.EndsWith(DisabledSuffix, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
 
-            foreach (var dir in Directory.EnumerateDirectories(directory, "*" + DisabledSuffix))
-            {
-                result.Add(Build(kind, dir, isDirectory: true));
+                Add(dir, isDirectory: true);
             }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+
+        var patterns = kind switch
         {
-            _log.Warn($"扫描资源目录失败：{directory}", ex);
+            ResourceKind.Mod => new[] { "*.jar" },
+            // 原理图有多种格式：Litematica / WorldEdit / Sponge / 原版结构。
+            ResourceKind.Schematic => new[] { "*.litematic", "*.schematic", "*.schem", "*.nbt" },
+            _ => new[] { "*.zip" },
+        };
+
+        foreach (var pattern in patterns)
+        {
+            foreach (var file in Directory.EnumerateFiles(directory, pattern))
+            {
+                Add(file, isDirectory: false);
+            }
+        }
+
+        if (kind == ResourceKind.ResourcePack || kind == ResourceKind.Datapack)
+        {
+            foreach (var file in Directory.EnumerateFiles(directory, "*.mcpack"))
+            {
+                Add(file, isDirectory: false);
+            }
+        }
+
+        // 禁用项：Mod 是 *.jar.disabled；目录型是目录名带后缀。
+        foreach (var file in Directory.EnumerateFiles(directory, "*" + DisabledSuffix))
+        {
+            if (!file.EndsWith(".jar" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
+                && !file.EndsWith(".zip" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
+                && !file.EndsWith(".mcpack" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
+                && !file.EndsWith(".litematic" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
+                && !file.EndsWith(".schematic" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
+                && !file.EndsWith(".schem" + DisabledSuffix, StringComparison.OrdinalIgnoreCase)
+                && !file.EndsWith(".nbt" + DisabledSuffix, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            Add(file, isDirectory: false);
+        }
+
+        foreach (var dir in Directory.EnumerateDirectories(directory, "*" + DisabledSuffix))
+        {
+            Add(dir, isDirectory: true);
         }
 
         result.Sort((a, b) => string.Compare(a.Title, b.Title, StringComparison.OrdinalIgnoreCase));
@@ -160,6 +170,13 @@ public sealed class ResourceRepository
         }
 
         var path = resource.FilePath;
+
+        // 只有在路径确实带禁用后缀时才能截断，否则会把正常文件名尾部截掉甚至越界。
+        if (enabled && !path.EndsWith(DisabledSuffix, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
         var target = enabled
             ? path[..^DisabledSuffix.Length]
             : path + DisabledSuffix;
@@ -319,10 +336,27 @@ public sealed class ResourceRepository
 
     // ------------------------------------------------------------------ 元数据解析
 
-    private LocalResource Build(ResourceKind kind, string path, bool isDirectory)
+    private LocalResource? Build(ResourceKind kind, string path, bool isDirectory)
     {
-        var info = new DirectoryInfo(path);
-        var name = isDirectory ? info.Name : Path.GetFileName(path);
+        string name;
+        DateTime modifiedAt;
+        long sizeBytes;
+
+        try
+        {
+            var info = new DirectoryInfo(path);
+            name = isDirectory ? info.Name : Path.GetFileName(path);
+            modifiedAt = isDirectory ? info.LastWriteTimeUtc : new FileInfo(path).LastWriteTimeUtc;
+
+            // 扫描与用户操作并发时，文件可能在枚举后立刻被删除或被独占；
+            // 这种情况只跳过这一项并记录，不能让整类扫描中断。
+            sizeBytes = isDirectory ? EstimateSize(path) : new FileInfo(path).Length;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            _log.Warn($"读取资源信息失败，已跳过：{path}", ex);
+            return null;
+        }
 
         var resource = new LocalResource
         {
@@ -330,8 +364,8 @@ public sealed class ResourceRepository
             FilePath = path,
             FileName = name,
             Enabled = !name.EndsWith(DisabledSuffix, StringComparison.OrdinalIgnoreCase),
-            ModifiedAt = isDirectory ? info.LastWriteTimeUtc : new FileInfo(path).LastWriteTimeUtc,
-            SizeBytes = isDirectory ? EstimateSize(path) : new FileInfo(path).Length,
+            ModifiedAt = modifiedAt,
+            SizeBytes = sizeBytes,
         };
 
         var effective = name.EndsWith(DisabledSuffix, StringComparison.OrdinalIgnoreCase)
@@ -384,13 +418,16 @@ public sealed class ResourceRepository
 
     private static void ReadModMetadata(LocalResource resource, string path)
     {
-        if (!File.Exists(path))
+        if (!File.Exists(path) || !ArchiveUtil.LooksLikeZip(path))
         {
             return;
         }
 
+        // 元数据与图标都在同一个 jar 里，共用一次 ZipArchive，避免每个条目重复打开压缩包。
+        using var archive = ZipFile.OpenRead(path);
+
         // Fabric：fabric.mod.json
-        var json = ArchiveUtil.ReadTextEntry(path, "fabric.mod.json");
+        var json = ReadTextEntry(archive, "fabric.mod.json");
         if (json is not null)
         {
             var mod = JsonUtil.Deserialize<FabricModMetadata>(json);
@@ -401,7 +438,7 @@ public sealed class ResourceRepository
                 resource.Description = mod.Description;
                 resource.Loader = "Fabric";
                 resource.IconBytes = ReadArchiveIcon(
-                    path,
+                    archive,
                     ReadIconPath(mod.Icon),
                     mod.Id is null ? null : $"assets/{mod.Id}/icon.png",
                     "icon.png",
@@ -411,7 +448,7 @@ public sealed class ResourceRepository
         }
 
         // Quilt：quilt.mod.json
-        var quiltJson = ArchiveUtil.ReadTextEntry(path, "quilt.mod.json");
+        var quiltJson = ReadTextEntry(archive, "quilt.mod.json");
         if (quiltJson is not null)
         {
             var quilt = JsonUtil.Deserialize<QuiltModMetadata>(quiltJson)?.Loader;
@@ -422,7 +459,7 @@ public sealed class ResourceRepository
                 resource.Description = quilt.Metadata?.Description;
                 resource.Loader = "Quilt";
                 resource.IconBytes = ReadArchiveIcon(
-                    path,
+                    archive,
                     ReadIconPath(quilt.Metadata?.Icon ?? default),
                     quilt.Id is null ? null : $"assets/{quilt.Id}/icon.png",
                     "icon.png",
@@ -432,18 +469,18 @@ public sealed class ResourceRepository
         }
 
         // Forge / NeoForge：META-INF/mods.toml 或 META-INF/neoforge.mods.toml
-        var toml = ArchiveUtil.ReadTextEntry(path, "META-INF/mods.toml");
+        var toml = ReadTextEntry(archive, "META-INF/mods.toml");
         var loader = "Forge";
 
         if (toml is null)
         {
-            toml = ArchiveUtil.ReadTextEntry(path, "META-INF/neoforge.mods.toml");
+            toml = ReadTextEntry(archive, "META-INF/neoforge.mods.toml");
             loader = "NeoForge";
         }
 
         if (toml is null)
         {
-            resource.IconBytes = ReadArchiveIcon(path, "icon.png", "logo.png");
+            resource.IconBytes = ReadArchiveIcon(archive, "icon.png", "logo.png");
             return;
         }
 
@@ -471,19 +508,14 @@ public sealed class ResourceRepository
         }
 
         resource.Loader = loader;
-        resource.IconBytes = ReadArchiveIcon(path, logoFile, "icon.png", "logo.png");
+        resource.IconBytes = ReadArchiveIcon(archive, logoFile, "icon.png", "logo.png");
     }
 
     private const int MaxIconBytes = 2 * 1024 * 1024;
 
-    /// <summary>从 jar / zip 里按候选路径找图标，找到第一个可用图片就返回。</summary>
-    private static byte[]? ReadArchiveIcon(string archivePath, params string?[] candidates)
+    /// <summary>从已打开的 jar / zip 里按候选路径找图标，找到第一个可用图片就返回。</summary>
+    private static byte[]? ReadArchiveIcon(ZipArchive archive, params string?[] candidates)
     {
-        if (!ArchiveUtil.LooksLikeZip(archivePath))
-        {
-            return null;
-        }
-
         foreach (var candidate in candidates)
         {
             if (string.IsNullOrWhiteSpace(candidate))
@@ -491,10 +523,24 @@ public sealed class ResourceRepository
                 continue;
             }
 
-            var entry = candidate.Trim().TrimStart('/').Replace('\\', '/');
+            var entry = FindEntry(archive, candidate);
+            if (entry is null)
+            {
+                continue;
+            }
+
+            // 图标只用于列表缩略图；按条目声明的原始大小先过滤，避免超大 icon.png 被整个读进内存。
+            if (entry.Length > MaxIconBytes)
+            {
+                continue;
+            }
+
             try
             {
-                var bytes = ArchiveUtil.ReadBytesEntry(archivePath, entry);
+                using var stream = entry.Open();
+                using var memory = new MemoryStream((int)entry.Length);
+                stream.CopyTo(memory);
+                var bytes = memory.ToArray();
                 if (IsUsableIcon(bytes))
                 {
                     return bytes;
@@ -508,11 +554,37 @@ public sealed class ResourceRepository
         return null;
     }
 
+    private static string? ReadTextEntry(ZipArchive archive, string entryName)
+    {
+        var entry = FindEntry(archive, entryName);
+        if (entry is null)
+        {
+            return null;
+        }
+
+        using var stream = entry.Open();
+        using var reader = new StreamReader(stream, System.Text.Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
+    private static ZipArchiveEntry? FindEntry(ZipArchive archive, string entryName)
+    {
+        var normalized = entryName.Trim().TrimStart('/').Replace('\\', '/');
+        return archive.Entries.FirstOrDefault(entry =>
+            string.Equals(entry.FullName.Replace('\\', '/').TrimStart('/'), normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
     private static byte[]? ReadFileIcon(string path)
     {
         try
         {
             if (!File.Exists(path))
+            {
+                return null;
+            }
+
+            // 与压缩包条目同样先看文件大小，避免异常的大图一次性读进内存。
+            if (new FileInfo(path).Length > MaxIconBytes)
             {
                 return null;
             }
@@ -566,34 +638,42 @@ public sealed class ResourceRepository
 
     private static void ReadPackMetadata(LocalResource resource, string path)
     {
-        var isDirectory = Directory.Exists(path);
-        string? json = null;
-
-        if (isDirectory)
+        if (Directory.Exists(path))
         {
             var file = Path.Combine(path, "pack.mcmeta");
             if (File.Exists(file))
             {
-                json = File.ReadAllText(file);
+                ApplyPackMeta(resource, File.ReadAllText(file));
             }
-        }
-        else if (ArchiveUtil.LooksLikeZip(path))
-        {
-            json = ArchiveUtil.ReadTextEntry(path, "pack.mcmeta")
-                   ?? ArchiveUtil.ReadTextEntry(path, "pack/pack.mcmeta");
+
+            // 资源包 / 光影包的封面图都叫 pack.png。
+            resource.IconBytes = ReadFileIcon(Path.Combine(path, "pack.png"));
+            return;
         }
 
+        if (!ArchiveUtil.LooksLikeZip(path))
+        {
+            return;
+        }
+
+        // 与 jar 相同：元数据与封面共用一次 ZipArchive。
+        using var archive = ZipFile.OpenRead(path);
+
+        var json = ReadTextEntry(archive, "pack.mcmeta")
+                   ?? ReadTextEntry(archive, "pack/pack.mcmeta");
         if (json is not null)
         {
-            var pack = JsonUtil.Deserialize<PackMcMeta>(json);
-            resource.Description = ReadPackDescription(pack);
-            resource.Version = pack?.Pack?.PackFormat.ToString();
+            ApplyPackMeta(resource, json);
         }
 
-        // 资源包 / 光影包的封面图都叫 pack.png。
-        resource.IconBytes = isDirectory
-            ? ReadFileIcon(Path.Combine(path, "pack.png"))
-            : ReadArchiveIcon(path, "pack.png");
+        resource.IconBytes = ReadArchiveIcon(archive, "pack.png");
+    }
+
+    private static void ApplyPackMeta(LocalResource resource, string json)
+    {
+        var pack = JsonUtil.Deserialize<PackMcMeta>(json);
+        resource.Description = ReadPackDescription(pack);
+        resource.Version = pack?.Pack?.PackFormat.ToString();
     }
 
     /// <summary>pack.mcmeta 的 description 既可能是字符串，也可能是 <c>{"translate": "..."}</c>。</summary>

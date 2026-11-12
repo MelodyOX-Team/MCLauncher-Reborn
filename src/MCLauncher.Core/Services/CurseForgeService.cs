@@ -13,7 +13,8 @@ namespace MCLauncher.Core.Services;
 /// CurseForge 检索、文件查询与指纹匹配。
 /// <para>
 /// classId 实测对应关系：Mod=6、资源包=12、世界=17、光影包=6552。
-/// 所有请求都带 <c>x-api-key</c>；官方接口失败时按配置回退到 Mod 镜像。
+/// 所有请求都带 <c>x-api-key</c>，因此只能访问 CurseForge 官方域名，绝不回退到第三方镜像
+/// （否则 Key 会泄露给镜像）；只有下载文件本身允许走镜像。
 /// </para>
 /// </summary>
 public sealed class CurseForgeService
@@ -387,6 +388,12 @@ public sealed class CurseForgeService
 
         foreach (var candidate in _resolver.Resolve(url, DownloadUrlKind.ModPlatform))
         {
+            // Key 只能发给官方 API；候选里的镜像地址直接跳过。
+            if (!IsOfficialApiUrl(candidate.Url))
+            {
+                continue;
+            }
+
             try
             {
                 return await _downloader.RequestStringAsync(
@@ -426,6 +433,11 @@ public sealed class CurseForgeService
 
         throw new InvalidOperationException(hint, lastError);
     }
+
+    /// <summary>该地址是否是 CurseForge 官方 API（唯一允许接收 x-api-key 的主机）。</summary>
+    private static bool IsOfficialApiUrl(string url) =>
+        Uri.TryCreate(url, UriKind.Absolute, out var uri)
+        && uri.Host.Equals("api.curseforge.com", StringComparison.OrdinalIgnoreCase);
 
     // ---------------------------------------------------------------- 映射
 

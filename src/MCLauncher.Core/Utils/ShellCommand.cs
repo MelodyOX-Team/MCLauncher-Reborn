@@ -39,9 +39,9 @@ public static class ShellCommand
             StandardErrorEncoding = ResolveConsoleEncoding(),
         };
 
-        // 整条命令交给 cmd 自己解析，避免我们提前拆坏引号或重定向符。
-        startInfo.ArgumentList.Add("/c");
-        startInfo.ArgumentList.Add(command);
+        // 整条命令交给 cmd 自己解析。不能用 ArgumentList：.NET 的转义会破坏命令里的引号，
+        // 必须按 /d /s /c "命令" 的原始形式交给 cmd。
+        startInfo.Arguments = "/d /s /c \"" + command + "\"";
 
         using var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         process.OutputDataReceived += (_, e) =>
@@ -67,7 +67,33 @@ public static class ShellCommand
         process.BeginOutputReadLine();
         process.BeginErrorReadLine();
 
-        await process.WaitForExitAsync(ct).ConfigureAwait(false);
+        try
+        {
+            await process.WaitForExitAsync(ct).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            try
+            {
+                process.Kill(entireProcessTree: true);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                // 已经退出就忽略。
+            }
+
+            // Kill 之后必须等进程真正退出，避免留下仍在写输出的子进程。
+            try
+            {
+                await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+            {
+                // 进程已消失。
+            }
+
+            throw;
+        }
 
         // WaitForExitAsync 在进程退出时就会返回，再等一次确保重定向流已读完。
         process.WaitForExit();

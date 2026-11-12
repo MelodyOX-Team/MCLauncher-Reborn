@@ -69,8 +69,15 @@ public sealed class ForgeInstallerService
 
         if (File.Exists(path) && new FileInfo(path).Length > 0)
         {
-            _log.Info($"复用已下载的 {ModLoaderService.DisplayName(kind)} 安装器：{path}");
-            return path;
+            // 上次中断或安全软件扫描可能留下不完整的文件；结构不可读就删掉重下。
+            if (IsReadableZip(path))
+            {
+                _log.Info($"复用已下载的 {ModLoaderService.DisplayName(kind)} 安装器：{path}");
+                return path;
+            }
+
+            _log.Warn($"已缓存的 {ModLoaderService.DisplayName(kind)} 安装器不是有效的 ZIP，将重新下载：{path}");
+            TryDeleteFile(path);
         }
 
         var batch = new DownloadBatch(_downloader, _log);
@@ -194,6 +201,9 @@ public sealed class ForgeInstallerService
             Completed = 1,
             Total = 1,
         });
+
+        // 必须先释放安装器 ZIP：Windows 上文件仍被占用时删除缓存目录会失败。
+        archive.Dispose();
 
         CleanupInstallerCache(gameRoot);
         return versionJson;
@@ -522,6 +532,16 @@ public sealed class ForgeInstallerService
             catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
             {
                 // 已经退出就忽略。
+            }
+
+            // 进程被杀后管道会关闭；必须等待输出读取任务结束，否则会留下孤儿任务。
+            try
+            {
+                await Task.WhenAll(stdout, stderr).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+            {
+                // 输出读取随进程结束而失败，不影响超时判定。
             }
 
             throw new TimeoutException($"处理器超过 {ProcessorTimeout.TotalMinutes:0} 分钟没有结束");
@@ -998,6 +1018,21 @@ public sealed class ForgeInstallerService
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
             _log.Warn($"清理安装临时目录失败：{path}", ex);
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            // 删除失败时下载阶段会覆盖写入，不影响继续。
         }
     }
 }

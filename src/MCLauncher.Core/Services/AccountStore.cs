@@ -169,16 +169,24 @@ public sealed class AccountStore
         }
 
         // 连同「无法解密」的备份一起销毁，否则令牌仍以密文形式留在磁盘上。
-        foreach (var backup in Directory.GetFiles(_config.ConfigDirectory, "accounts-unreadable-*.json"))
+        try
         {
-            try
+            foreach (var backup in Directory.GetFiles(_config.ConfigDirectory, "accounts-unreadable-*.json"))
             {
-                File.Delete(backup);
+                try
+                {
+                    File.Delete(backup);
+                }
+                catch (Exception ex)
+                {
+                    _log.Warn($"删除账号备份失败：{backup}", ex);
+                }
             }
-            catch (Exception ex)
-            {
-                _log.Warn($"删除账号备份失败：{backup}", ex);
-            }
+        }
+        catch (Exception ex)
+        {
+            // 目录不存在或不可枚举时不能中断后续清理。
+            _log.Warn($"枚举账号备份目录失败：{_config.ConfigDirectory}", ex);
         }
 
         _accounts.Clear();
@@ -201,6 +209,16 @@ public sealed class AccountStore
         if (legacy is null || legacy.Count == 0)
         {
             _config.Settings.LegacyAccounts = null;
+            return;
+        }
+
+        // accounts.json 已经成功读出账号时，settings.json 里的旧数据只可能是上次迁移
+        // 保存失败留下的残留。此时绝不能覆盖，否则会把后来新增/更新的账号整批丢掉。
+        if (_accounts.Count > 0)
+        {
+            _config.Settings.LegacyAccounts = null;
+            _config.Save();
+            _log.Info("accounts.json 已有账号，已忽略 settings.json 里的旧账号迁移数据");
             return;
         }
 

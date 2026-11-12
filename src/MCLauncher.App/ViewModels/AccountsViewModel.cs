@@ -143,6 +143,7 @@ public sealed class AccountsViewModel : ViewModelBase
     private string _externalHomepage = string.Empty;
     private string _externalRegister = string.Empty;
     private bool _isExternalBusy;
+    private int _serverLinksRequest;
 
     private string _newServerName = string.Empty;
     private string _newServerUrl = string.Empty;
@@ -781,16 +782,24 @@ public sealed class AccountsViewModel : ViewModelBase
         OnPropertyChanged(nameof(HasExternalRegister));
         IsExternalDialogOpen = true;
 
-        _ = LoadServerLinksAsync(server.Entry.Url);
+        // 连续打开两个外置登录服务器时，只让最后一次请求的元数据生效。
+        var request = ++_serverLinksRequest;
+        _ = LoadServerLinksAsync(server.Entry.Url, request);
     }
 
-    private async Task LoadServerLinksAsync(string url)
+    private async Task LoadServerLinksAsync(string url, int request)
     {
         try
         {
             var metadata = await _stack.AuthlibAuth.FetchMetadataAsync(url).ConfigureAwait(false);
             UiThread.Post(() =>
             {
+                // 先发的请求可能后到，回包时校验代号，避免覆盖后一个服务器的入口。
+                if (request != _serverLinksRequest)
+                {
+                    return;
+                }
+
                 _externalHomepage = metadata.Homepage ?? string.Empty;
                 _externalRegister = metadata.Register ?? string.Empty;
                 OnPropertyChanged(nameof(HasExternalHomepage));
@@ -1453,6 +1462,11 @@ public sealed class AccountsViewModel : ViewModelBase
 
             StatusText = "浏览器已打开登录页，请粘贴验证码并确认授权";
             OpenDeviceCodePage();
+        }
+        catch (Exception ex)
+        {
+            // async void 抛出的异常会直接进 Dispatcher，未处理时会带崩进程，这里兜底记录。
+            _stack.Log.Warn("准备打开微软登录页失败", ex);
         }
         finally
         {

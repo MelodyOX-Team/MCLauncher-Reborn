@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -49,21 +50,25 @@ public sealed class ProtectedStringConverter : JsonConverter<string?>
             return;
         }
 
-        if (OperatingSystem.IsWindows())
+        if (!OperatingSystem.IsWindows())
         {
-            try
-            {
-                var cipher = ProtectedData.Protect(
-                    Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser);
-                writer.WriteStringValue(Prefix + Convert.ToBase64String(cipher));
-                return;
-            }
-            catch (Exception ex) when (ex is CryptographicException or PlatformNotSupportedException)
-            {
-                // 落到下面的明文分支：宁可少一层保护，也不能把配置写成空值。
-            }
+            // 非 Windows 没有 DPAPI，写明文等于把令牌直接公开，宁可丢掉这一项。
+            Debug.WriteLine("ProtectedStringConverter：当前平台不支持 DPAPI，已跳过敏感字段写入。");
+            writer.WriteNullValue();
+            return;
         }
 
-        writer.WriteStringValue(value);
+        try
+        {
+            var cipher = ProtectedData.Protect(
+                Encoding.UTF8.GetBytes(value), null, DataProtectionScope.CurrentUser);
+            writer.WriteStringValue(Prefix + Convert.ToBase64String(cipher));
+        }
+        catch (Exception ex) when (ex is CryptographicException or PlatformNotSupportedException)
+        {
+            // 加密失败时不能退回明文：敏感字段直接写 null，让调用方/加载逻辑按「没有凭据」处理。
+            Debug.WriteLine($"ProtectedStringConverter：DPAPI 加密失败，已跳过该字段：{ex}");
+            writer.WriteNullValue();
+        }
     }
 }

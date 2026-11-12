@@ -114,10 +114,32 @@ public sealed class VersionManifestService
     }
 
     /// <summary>下载该版本的 JSON 文本（校验 SHA-1）。</summary>
-    public Task<string> GetVersionJsonTextAsync(VersionManifestEntry entry, CancellationToken ct = default) =>
-        entry.Url is null
-            ? throw new InvalidOperationException($"版本 {entry.Id} 在清单里没有 url")
-            : _downloader.GetStringAsync(_resolver.Resolve(entry.Url, DownloadUrlKind.Metadata), ct);
+    public async Task<string> GetVersionJsonTextAsync(VersionManifestEntry entry, CancellationToken ct = default)
+    {
+        if (entry.Url is null)
+        {
+            throw new InvalidOperationException($"版本 {entry.Id} 在清单里没有 url");
+        }
+
+        var text = await _downloader
+            .GetStringAsync(_resolver.Resolve(entry.Url, DownloadUrlKind.Metadata), ct)
+            .ConfigureAwait(false);
+
+        // 清单条目自带该 JSON 的 SHA-1；不一致说明内容被镜像或中间人改过，不能拿去安装。
+        if (string.IsNullOrWhiteSpace(entry.Sha1))
+        {
+            throw new InvalidDataException($"版本 {entry.Id} 在清单里没有 SHA-1，无法校验 JSON");
+        }
+
+        var actual = HashUtil.Sha1OfString(text);
+        if (!string.Equals(actual, entry.Sha1, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                $"版本 {entry.Id} 的 JSON 校验失败（期望 {entry.Sha1}，实际 {actual}）");
+        }
+
+        return text;
+    }
 
     /// <summary>下载并解析该版本的 JSON。</summary>
     public async Task<GameVersionJson> GetVersionJsonAsync(VersionManifestEntry entry, CancellationToken ct = default)

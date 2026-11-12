@@ -94,15 +94,34 @@ public sealed class ResourceDownloadService
             return ResourceDownloadResult.Fail($"文件名不合法：{file.FileName}");
         }
 
-        var target = UniqueTarget(directory, fileName);
-        var result = await DownloadFileCoreAsync(file, target, target, progress, ct).ConfigureAwait(false);
-
-        if (result.Success)
+        var target = TryReserveUniqueTarget(directory, fileName);
+        if (target is null)
         {
-            _log.Info($"已下载文件：{target}");
+            return ResourceDownloadResult.Fail($"同名文件正在下载：{fileName}");
         }
 
-        return result;
+        try
+        {
+            var result = await DownloadFileCoreAsync(file, target, target, progress, ct).ConfigureAwait(false);
+
+            if (result.Success)
+            {
+                _log.Info($"已下载文件：{target}");
+            }
+
+            return result;
+        }
+        catch (OperationCanceledException)
+        {
+            // 取消后临时文件没有留存价值，避免下次续传拼出错误内容。
+            TryDeleteFile(target);
+            TryDeleteFile(target + ".part");
+            throw;
+        }
+        finally
+        {
+            Release(target);
+        }
     }
 
     private async Task<ResourceDownloadResult> DownloadFileAsync(
@@ -134,6 +153,11 @@ public sealed class ResourceDownloadService
             var targetName = disabled ? fileName + ResourceRepository.DisabledSuffix : fileName;
 
             target = Path.Combine(directory, targetName);
+            if (!TryReserve(target))
+            {
+                return ResourceDownloadResult.Fail("该资源正在更新，请稍后再试。");
+            }
+
             temp = target + ".download";
         }
         else if (!string.IsNullOrWhiteSpace(request.TargetFileName))
@@ -146,37 +170,62 @@ public sealed class ResourceDownloadService
                 return ResourceDownloadResult.Fail($"已存在同名文件：{fileName}");
             }
 
+            if (!TryReserve(target))
+            {
+                return ResourceDownloadResult.Fail($"同名文件正在下载：{fileName}");
+            }
+
             temp = target;
         }
         else
         {
-            target = UniqueTarget(directory, fileName);
+            var reservedTarget = TryReserveUniqueTarget(directory, fileName);
+            if (reservedTarget is null)
+            {
+                return ResourceDownloadResult.Fail($"同名文件正在下载：{fileName}");
+            }
+
+            target = reservedTarget;
             temp = target;
         }
 
-        var result = await DownloadFileCoreAsync(request.File, temp, target, progress, ct)
-            .ConfigureAwait(false);
-
-        if (!result.Success)
+        try
         {
-            // 临时文件与 .part 在失败后都没有价值，留着只会越积越多。
-            if (!PathUtil.IsSamePath(temp, target))
+            var result = await DownloadFileCoreAsync(request.File, temp, target, progress, ct)
+                .ConfigureAwait(false);
+
+            if (!result.Success)
             {
-                TryDeleteFile(temp);
+                // 临时文件与 .part 在失败后都没有价值，留着只会越积越多。
+                if (!PathUtil.IsSamePath(temp, target))
+                {
+                    TryDeleteFile(temp);
+                }
+
                 TryDeleteFile(temp + ".part");
+                return result;
             }
 
+            if (request.ReplacePath is { Length: > 0 } replacedPath
+                && !PathUtil.IsSamePath(replacedPath, target))
+            {
+                TryDeleteFile(replacedPath);
+            }
+
+            _log.Info($"已下载 {ResourceRepository.DisplayName(request.Kind)}：{fileName}");
             return result;
         }
-
-        if (request.ReplacePath is { Length: > 0 } replacedPath
-            && !PathUtil.IsSamePath(replacedPath, target))
+        catch (OperationCanceledException)
         {
-            TryDeleteFile(replacedPath);
+            // 取消时同样清掉半成品，避免下次续传把旧数据拼进来。
+            TryDeleteFile(temp);
+            TryDeleteFile(temp + ".part");
+            throw;
         }
-
-        _log.Info($"已下载 {ResourceRepository.DisplayName(request.Kind)}：{fileName}");
-        return result;
+        finally
+        {
+            Release(target);
+        }
     }
 
     private async Task<ResourceDownloadResult> DownloadFileCoreAsync(
@@ -295,9 +344,21 @@ public sealed class ResourceDownloadService
                                 ?? extractDirectory;
                 var baseName = PathUtil.MakeSafeFileName(
                     Path.GetFileNameWithoutExtension(request.File.FileName));
-                var target = UniqueTarget(savesDirectory, baseName);
+                var target = TryReserveUniqueTarget(savesDirectory, baseName);
+                if (target is null)
+                {
+                    return ResourceDownloadResult.Fail("同名存档正在安装，请稍后再试。");
+                }
 
-                Directory.Move(worldRoot, target);
+                try
+                {
+                    // 临时目录通常在系统盘，存档目录可能在别的盘，Directory.Move 跨卷会直接抛 IOException。
+                    MoveDirectory(worldRoot, target);
+                }
+                finally
+                {
+                    Release(target);
+                }
 
                 progress?.Report(new InstallProgress { Stage = "解压存档", Completed = 1, Total = 1 });
                 _log.Info($"已下载世界存档：{request.File.FileName} → {target}");
@@ -319,7 +380,9 @@ public sealed class ResourceDownloadService
         }
         finally
         {
+            // 取消时 HttpDownloader 只留下 tempZip.part，两个都要清掉。
             TryDeleteFile(tempZip);
+            TryDeleteFile(tempZip + ".part");
         }
     }
 
@@ -365,27 +428,110 @@ public sealed class ResourceDownloadService
         return null;
     }
 
-    private static string UniqueTarget(string directory, string fileName)
-    {
-        var target = Path.Combine(directory, fileName);
-        if (!File.Exists(target) && !Directory.Exists(target))
-        {
-            return target;
-        }
+    // 进程内占位：同一个目标路径同一时刻只允许一个下载任务使用，
+    // 否则两个任务会同时写同一个 .part，互相覆盖出损坏文件。
+    private static readonly object TargetGate = new();
+    private static readonly HashSet<string> ReservedTargets = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>占用一个目标路径；该路径已被其他任务占用时返回 false。</summary>
+    private static bool TryReserve(string target)
+    {
+        lock (TargetGate)
+        {
+            return ReservedTargets.Add(target);
+        }
+    }
+
+    private static void Release(string target)
+    {
+        lock (TargetGate)
+        {
+            ReservedTargets.Remove(target);
+        }
+    }
+
+    /// <summary>
+    /// 在进程内为一次下载占用唯一目标路径。同名路径正在下载时返回 null（重复请求直接失败），
+    /// 磁盘上已有同名文件时沿用递增编号的规则。
+    /// </summary>
+    private static string? TryReserveUniqueTarget(string directory, string fileName)
+    {
+        var baseTarget = Path.Combine(directory, fileName);
         var name = Path.GetFileNameWithoutExtension(fileName);
         var extension = Path.GetExtension(fileName);
 
-        for (var index = 2; index < 1000; index++)
+        lock (TargetGate)
         {
-            target = Path.Combine(directory, $"{name} ({index}){extension}");
-            if (!File.Exists(target) && !Directory.Exists(target))
+            if (ReservedTargets.Contains(baseTarget))
             {
-                return target;
+                return null;
             }
+
+            if (!File.Exists(baseTarget) && !Directory.Exists(baseTarget))
+            {
+                ReservedTargets.Add(baseTarget);
+                return baseTarget;
+            }
+
+            for (var index = 2; index < 1000; index++)
+            {
+                var candidate = Path.Combine(directory, $"{name} ({index}){extension}");
+                if (!File.Exists(candidate) && !Directory.Exists(candidate)
+                    && !ReservedTargets.Contains(candidate))
+                {
+                    ReservedTargets.Add(candidate);
+                    return candidate;
+                }
+            }
+
+            var fallback = Path.Combine(directory, $"{name}_{Guid.NewGuid():N}{extension}");
+            ReservedTargets.Add(fallback);
+            return fallback;
+        }
+    }
+
+    /// <summary>移动目录；不在同一个卷时 Directory.Move 会失败，退化成复制后删除。</summary>
+    private static void MoveDirectory(string source, string target)
+    {
+        var sourceRoot = Path.GetPathRoot(Path.GetFullPath(source)) ?? string.Empty;
+        var targetRoot = Path.GetPathRoot(Path.GetFullPath(target)) ?? string.Empty;
+
+        if (string.Equals(sourceRoot, targetRoot, StringComparison.OrdinalIgnoreCase))
+        {
+            Directory.Move(source, target);
+            return;
         }
 
-        return Path.Combine(directory, $"{name}_{Guid.NewGuid():N}{extension}");
+        try
+        {
+            CopyDirectory(source, target);
+        }
+        catch
+        {
+            // 复制到一半失败时清掉目标目录，避免留下一个半残的存档。
+            TryDeleteDirectory(target);
+            throw;
+        }
+
+        // 复制已经成功，源目录删不掉不应反过来判定安装失败（外层还会再清理一次临时目录）。
+        TryDeleteDirectory(source);
+    }
+
+    private static void CopyDirectory(string source, string target)
+    {
+        PathUtil.EnsureDirectory(target);
+
+        foreach (var dir in Directory.EnumerateDirectories(source, "*", SearchOption.AllDirectories))
+        {
+            PathUtil.EnsureDirectory(Path.Combine(target, Path.GetRelativePath(source, dir)));
+        }
+
+        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        {
+            var destination = Path.Combine(target, Path.GetRelativePath(source, file));
+            PathUtil.EnsureParentDirectory(destination);
+            File.Copy(file, destination, overwrite: true);
+        }
     }
 
     private static void TryDeleteFile(string path)

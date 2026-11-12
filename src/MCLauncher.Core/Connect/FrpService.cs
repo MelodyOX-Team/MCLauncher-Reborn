@@ -74,6 +74,9 @@ public sealed class FrpService : IDisposable
     private readonly object _logLock = new();
     private readonly JobObject _job;
 
+    /// <summary>保护 <see cref="_processes"/> 与 <see cref="_remoteAddresses"/> 的唯一锁。</summary>
+    private readonly object _processLock = new();
+
     /// <summary>隧道 id → 进程。多进程并存，每个对应一条勾选的隧道。</summary>
     private readonly Dictionary<string, Process> _processes = new();
 
@@ -233,7 +236,12 @@ public sealed class FrpService : IDisposable
         }
 
         // 停掉不再需要的隧道（用户之前勾过、现在没勾的）
-        var toStop = _processes.Keys.Except(ids).ToList();
+        List<string> toStop;
+        lock (_processLock)
+        {
+            toStop = _processes.Keys.Except(ids).ToList();
+        }
+
         foreach (var id in toStop)
         {
             await StopOneAsync(id).ConfigureAwait(false);
@@ -259,7 +267,13 @@ public sealed class FrpService : IDisposable
             }
 
             // 这条已经在跑了，跳过。
-            if (_processes.ContainsKey(tunnelId))
+            bool alreadyRunning;
+            lock (_processLock)
+            {
+                alreadyRunning = _processes.ContainsKey(tunnelId);
+            }
+
+            if (alreadyRunning)
             {
                 continue;
             }
@@ -294,10 +308,16 @@ public sealed class FrpService : IDisposable
                 _log.Warn("frpc 未成功挂到 Job Object，崩溃时可能残留子进程", ex);
             }
 
+            // 必须先登记再开始读输出：进程可能瞬间退出，
+            // 若 Exited 回调早于登记触发，HandleExit 的引用校验会找不到当前进程而漏掉清理。
+            lock (_processLock)
+            {
+                _processes[tunnelId] = process;
+            }
+
             process.BeginOutputReadLine();
             process.BeginErrorReadLine();
 
-            _processes[tunnelId] = process;
             _log.Info($"已启动樱花穿透 frpc（PID {process.Id}，隧道 #{tunnelId}）");
         }
 
@@ -310,12 +330,21 @@ public sealed class FrpService : IDisposable
     {
         ++_epoch;
 
-        foreach (var id in _processes.Keys.ToList())
+        List<string> runningIds;
+        lock (_processLock)
+        {
+            runningIds = _processes.Keys.ToList();
+        }
+
+        foreach (var id in runningIds)
         {
             await StopOneAsync(id).ConfigureAwait(false);
         }
 
-        _remoteAddresses.Clear();
+        lock (_processLock)
+        {
+            _remoteAddresses.Clear();
+        }
 
         SetStateSafe(new FrpState
         {
@@ -331,14 +360,23 @@ public sealed class FrpService : IDisposable
     public async Task<FrpState> StopOneAsync(string tunnelId)
     {
         var key = tunnelId.Trim();
-        if (!_processes.TryGetValue(key, out var process))
+
+        Process? process = null;
+        lock (_processLock)
+        {
+            if (_processes.TryGetValue(key, out var tracked))
+            {
+                process = tracked;
+                _processes.Remove(key);
+                _remoteAddresses.Remove(int.TryParse(key, out var n) ? n : 0);
+            }
+        }
+
+        if (process is null)
         {
             RebuildState();
             return _state;
         }
-
-        _processes.Remove(key);
-        _remoteAddresses.Remove(int.TryParse(key, out var n) ? n : 0);
 
         try
         {
@@ -405,7 +443,10 @@ public sealed class FrpService : IDisposable
 
         if (address is not null)
         {
-            _remoteAddresses[tunnelKey] = address;
+            lock (_processLock)
+            {
+                _remoteAddresses[tunnelKey] = address;
+            }
         }
 
         if (status is not null)
@@ -424,11 +465,18 @@ public sealed class FrpService : IDisposable
         AppendLog($"[隧道 #{tunnelId}] frpc 已退出（code={code}）");
         _log.Info($"隧道 #{tunnelId} frpc 已退出（code={code}）");
 
-        _processes.Remove(tunnelId);
-
-        if (int.TryParse(tunnelId, out var n))
+        // 只认当前登记的同一条进程：旧进程的退出事件可能晚到，
+        // 若不校验引用，会把刚启动的新进程从表里误删。
+        lock (_processLock)
         {
-            _remoteAddresses.Remove(n);
+            if (_processes.TryGetValue(tunnelId, out var current) && ReferenceEquals(current, process))
+            {
+                _processes.Remove(tunnelId);
+                if (int.TryParse(tunnelId, out var n))
+                {
+                    _remoteAddresses.Remove(n);
+                }
+            }
         }
 
         try { process.Dispose(); } catch { }
@@ -439,9 +487,17 @@ public sealed class FrpService : IDisposable
     /// <summary>按当前所有存活进程 + 已解析地址重建汇总状态。</summary>
     private void RebuildState(FrpStatusKind? forceStatus = null)
     {
-        var alive = _processes.Values.Where(p => !p.HasExited).ToList();
+        // 先在锁内取快照，计算与事件触发都放到锁外，避免回调里再次进锁造成死锁。
+        List<Process> alive;
+        Dictionary<int, string> remoteAddrs;
+        lock (_processLock)
+        {
+            alive = _processes.Values.Where(p => !p.HasExited).ToList();
+            remoteAddrs = new Dictionary<int, string>(_remoteAddresses);
+        }
+
         var total = alive.Count;
-        var connected = _remoteAddresses.Count;
+        var connected = remoteAddrs.Count;
 
         // 全部进程都退出了 → Error
         if (total == 0)
@@ -458,8 +514,8 @@ public sealed class FrpService : IDisposable
             {
                 Status = finalStatus,
                 Message = finalMessage,
-                RemoteAddress = _remoteAddresses.Values.FirstOrDefault(),
-                RemoteAddresses = new Dictionary<int, string>(_remoteAddresses),
+                RemoteAddress = remoteAddrs.Values.FirstOrDefault(),
+                RemoteAddresses = remoteAddrs,
                 RunningTunnelCount = 0,
                 Logs = SnapshotLogs(),
             });
@@ -467,7 +523,6 @@ public sealed class FrpService : IDisposable
         }
 
         // 至少还有一个进程活着
-        var remoteAddrs = new Dictionary<int, string>(_remoteAddresses);
         var remote = remoteAddrs.Values.FirstOrDefault();
         var hasConnected = remoteAddrs.Count > 0;
 
@@ -628,10 +683,16 @@ public sealed class FrpService : IDisposable
     {
         ++_epoch;
 
-        foreach (var id in _processes.Keys.ToList())
+        List<Process> tracked;
+        lock (_processLock)
         {
-            var process = _processes[id];
-            _processes.Remove(id);
+            tracked = _processes.Values.ToList();
+            _processes.Clear();
+            _remoteAddresses.Clear();
+        }
+
+        foreach (var process in tracked)
+        {
             try
             {
                 if (!process.HasExited)
@@ -646,8 +707,6 @@ public sealed class FrpService : IDisposable
                 try { process.Dispose(); } catch { }
             }
         }
-
-        _remoteAddresses.Clear();
 
         // Job Object 句柄关闭 → 内核自动级联杀所有子进程。
         _job.Dispose();

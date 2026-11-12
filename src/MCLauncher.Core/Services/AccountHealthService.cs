@@ -108,6 +108,12 @@ public sealed class AccountHealthService
                 Message = ex.Message,
             };
         }
+        catch (OperationCanceledException)
+        {
+            // 取消是调用方的意图（例如窗口关闭），不是账号状态信息；
+            // 当成「暂时无法检查」会把取消伪装成网络故障向上传播。
+            throw;
+        }
         catch (Exception ex)
         {
             _log.Warn($"检查账号失败（{account.Name}）", ex);
@@ -204,12 +210,18 @@ public sealed class AccountHealthService
         or MsAuthFailure.ChildAccount;
 
     /// <summary>
-    /// 外置登录的永久性失败：4xx 是服务器明确拒绝；没有 HTTP 内层异常说明返回体本身就不可用。
-    /// 5xx / 超时之类的服务端问题按「暂时无法检查」处理。
+    /// 外置登录的永久性失败：只有服务器以 401/403 或明确的 Yggdrasil 错误码拒绝才判失效。
+    /// JSON 解析失败、响应格式不对、没有访问令牌都只说明这次读不懂服务器在说什么，
+    /// 不能据此把账号置灰——否则一次服务端故障就会让用户被迫重新登录。
     /// </summary>
-    private static bool IsPermanent(AuthlibAuthException ex) =>
-        ex.InnerException is not HttpApiException api
-        || api.StatusCode is HttpStatusCode.BadRequest
-            or HttpStatusCode.Unauthorized
-            or HttpStatusCode.Forbidden;
+    private static bool IsPermanent(AuthlibAuthException ex)
+    {
+        if (ex.ErrorCode is "ForbiddenOperationException" or "TokenExpiredException")
+        {
+            return true;
+        }
+
+        return ex.InnerException is HttpApiException api
+            && api.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden;
+    }
 }

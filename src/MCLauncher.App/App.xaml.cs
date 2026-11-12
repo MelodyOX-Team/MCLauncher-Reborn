@@ -24,9 +24,31 @@ public partial class App : Application
     /// <summary>文件日志 sink：普通日志是批量落盘的，退出前必须关掉才能把最后一批写进文件。</summary>
     private static FileLogSink? _fileSink;
 
+    /// <summary>单实例互斥体：两个实例同时写 settings/accounts 会互相覆盖，必须只允许一个。</summary>
+    private static Mutex? _instanceMutex;
+
     protected override async void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+
+        // 未捕获的界面异常不能让进程直接崩掉，至少先记日志并给出提示。
+        DispatcherUnhandledException += OnDispatcherUnhandledException;
+        TaskScheduler.UnobservedTaskException += (_, args) =>
+        {
+            Log.Default.Error("后台任务未观察的异常", args.Exception);
+            args.SetObserved();
+        };
+
+        if (!TryAcquireSingleInstance())
+        {
+            MessageBox.Show(
+                "启动器已经在运行。为避免两个实例同时改写配置和账号文件，本次启动将退出。",
+                "MCLauncher-Reborn",
+                MessageBoxButton.OK,
+                MessageBoxImage.Information);
+            Shutdown();
+            return;
+        }
 
         _fileSink = new FileLogSink(GetLogDirectory());
         Log.Default.AttachSink(_fileSink);
@@ -36,6 +58,9 @@ public partial class App : Application
         AsyncCommandErrors.Handler = exception => log.Error("界面命令执行失败", exception);
 
         SplashWindow? splash = null;
+
+        // 用户直接关掉启动页（Alt+F4）时取消预取并退出，不要继续弹主窗口。
+        var splashClosed = false;
 
         try
         {
@@ -131,6 +156,11 @@ public partial class App : Application
 
             using var startupCts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
             splash.SkipClicked += (_, _) => startupCts.Cancel();
+            splash.Closing += (_, _) =>
+            {
+                splashClosed = true;
+                startupCts.Cancel();
+            };
 
             var launcherInfo = new LauncherInfoService(stack.Downloader, log);
 
@@ -151,6 +181,13 @@ public partial class App : Application
 
             splash.SetStatus("正在准备主界面…");
             await Task.WhenAll(noticeTask, updateTask, backgroundTask);
+
+            if (splashClosed)
+            {
+                log.Info("启动页已被用户关闭，启动器退出");
+                Shutdown();
+                return;
+            }
 
             ApplyStartupContent(shellViewModel, noticeTask.Result, updateTask.Result, log);
 
@@ -175,6 +212,12 @@ public partial class App : Application
             splash.Close();
             log.Info($"窗口已显示：{window.ActualWidth}x{window.ActualHeight}");
         }
+        catch (OperationCanceledException) when (splashClosed)
+        {
+            // 关闭启动页导致的取消不是错误，直接安静退出。
+            log.Info("启动页已被用户关闭，启动器退出");
+            Shutdown();
+        }
         catch (Exception ex)
         {
             log.Error("启动失败", ex);
@@ -190,19 +233,68 @@ public partial class App : Application
 
     protected override void OnExit(ExitEventArgs e)
     {
-        if (Services.TryResolve<ConfigService>(out var config) && config is not null)
+        try
         {
-            config.Save();
+            if (Services.TryResolve<ConfigService>(out var config) && config is not null)
+            {
+                config.Save();
+            }
+
+            Stack?.Dispose();
+        }
+        catch (Exception ex)
+        {
+            // 退出阶段任何清理失败都不能阻止后面的日志落盘与互斥体释放。
+            Log.Default.Error("退出清理失败", ex);
+        }
+        finally
+        {
+            Log.Default.Info("================ MCLauncher-Reborn 退出 ================");
+
+            // 文件日志是批量的，这里关掉 sink 才能把缓冲区里的最后几行写完。
+            _fileSink?.Dispose();
+            _fileSink = null;
+
+            _instanceMutex?.Dispose();
+            _instanceMutex = null;
+
+            base.OnExit(e);
+        }
+    }
+
+    /// <summary>
+    /// 按配置目录派生一个本机互斥体：只有同一配置目录的启动器才互斥，
+    /// 便携版放在不同目录时可以各开一个。
+    /// </summary>
+    private static bool TryAcquireSingleInstance()
+    {
+        var key = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(
+                System.Text.Encoding.UTF8.GetBytes(GetConfigDirectory())))[..16];
+
+        var mutex = new Mutex(initiallyOwned: true, $"Local\\MCLauncher-Reborn-{key}", out var createdNew);
+        if (!createdNew)
+        {
+            mutex.Dispose();
+            return false;
         }
 
-        Stack?.Dispose();
-        Log.Default.Info("================ MCLauncher-Reborn 退出 ================");
+        _instanceMutex = mutex;
+        return true;
+    }
 
-        // 文件日志是批量的，这里关掉 sink 才能把缓冲区里的最后几行写完。
-        _fileSink?.Dispose();
-        _fileSink = null;
-
-        base.OnExit(e);
+    /// <summary>界面线程未处理异常：写日志并提示，避免直接崩进程丢掉未保存的配置。</summary>
+    private static void OnDispatcherUnhandledException(
+        object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
+    {
+        Log.Default.Error("界面线程未处理的异常", e.Exception);
+        MessageBox.Show(
+            $"启动器遇到未处理的错误：{e.Exception.Message}"
+            + $"{Environment.NewLine}{Environment.NewLine}详情见日志：{GetLogDirectory()}",
+            "MCLauncher-Reborn",
+            MessageBoxButton.OK,
+            MessageBoxImage.Error);
+        e.Handled = true;
     }
 
     /// <summary>

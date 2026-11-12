@@ -272,9 +272,10 @@ public sealed class TerracottaService : IDisposable
                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(2));
                 await GetAsync(http, "/panic?peaceful=true", cts.Token).ConfigureAwait(false);
             }
-            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException or IOException)
+            catch (Exception ex) when (ex is HttpRequestException or OperationCanceledException
+                                           or IOException or ObjectDisposedException)
             {
-                // 进程可能已经退出。
+                // 进程可能已经退出；Exited 回调也可能已顺带释放了 HttpClient。
             }
 
             http.Dispose();
@@ -394,10 +395,23 @@ public sealed class TerracottaService : IDisposable
         var process = new Process { StartInfo = startInfo, EnableRaisingEvents = true };
         process.Exited += (_, _) =>
         {
-            if (_process != process || Volatile.Read(ref _busy) != 1)
+            // 只处理当前登记的那一条进程：旧进程的退出事件不能影响新会话。
+            if (!ReferenceEquals(_process, process))
             {
                 return;
             }
+
+            // 这里不再用 _busy 判断：房间 Ready 后 _busy 已归 0，
+            // 之前的判断会把“进程自行退出”整个吞掉，界面一直停留在 Running。
+            _process = null;
+
+            var http = _localHttp;
+            _localHttp = null;
+            http?.Dispose();
+
+            _pollCts?.Cancel();
+            _pollCts?.Dispose();
+            _pollCts = null;
 
             _log.Warn("陶瓦进程已退出");
             Publish(new TerracottaState
@@ -406,6 +420,8 @@ public sealed class TerracottaService : IDisposable
                 Error = "陶瓦进程已退出，请重试。",
                 BinaryReady = IsBinaryReady(),
             });
+
+            try { process.Dispose(); } catch { }
         };
 
         if (!process.Start())

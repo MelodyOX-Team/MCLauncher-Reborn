@@ -32,6 +32,16 @@ public sealed class LaunchLogViewModel : ViewModelBase
         AskDeepSeekCommand = new RelayCommand(() => OpenUrl("https://chat.deepseek.com/"));
         ClearCommand = new RelayCommand(ClearAll);
 
+        // 页面是首次导航才创建的。如果用户在打开本页之前就已经启动过游戏，
+        // 这里补上缓冲里已有的本次输出，并禁止再去读 latest.log，避免新旧内容混排。
+        var buffer = _stack.LaunchLog;
+        if (buffer.Generation > 0)
+        {
+            ReplaceLines(buffer.Join());
+            _hasProcessOutput = true;
+            SourceText = "本次启动输出";
+        }
+
         // 游戏进程的读取线程是后台线程，必须 marshal 回 UI。
         _stack.LaunchLog.LineAdded += line => UiThread.Post(() => Append(line));
 

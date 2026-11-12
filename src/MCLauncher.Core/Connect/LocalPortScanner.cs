@@ -22,6 +22,9 @@ public static class LocalPortScanner
     /// <summary>MIB_TCPROW_OWNER_PID：5 个 DWORD + PID = 24 字节。</summary>
     private const int RowSize = 24;
 
+    /// <summary>ERROR_INSUFFICIENT_BUFFER：两次取表之间监听端口变多，缓冲区不够。</summary>
+    private const int ErrorInsufficientBuffer = 122;
+
     /// <summary>按端口升序返回，重复端口（同一端口绑了多个地址）只保留一条。</summary>
     public static IReadOnlyList<LocalListeningPort> GetListeningTcpPorts()
     {
@@ -37,7 +40,22 @@ public static class LocalPortScanner
             }
 
             buffer = Marshal.AllocHGlobal(size);
-            var result = GetExtendedTcpTable(buffer, ref size, false, AddressFamilyInet, TableClassListener, 0);
+            var result = 0;
+
+            // 第一次取表只是探长度，紧跟着的取表可能仍返回 122；
+            // 此时 size 已被写成新长度，按新长度重新分配再取，避免直接返回空列表。
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                result = GetExtendedTcpTable(buffer, ref size, false, AddressFamilyInet, TableClassListener, 0);
+                if (result != ErrorInsufficientBuffer || size <= 0)
+                {
+                    break;
+                }
+
+                Marshal.FreeHGlobal(buffer);
+                buffer = Marshal.AllocHGlobal(size);
+            }
+
             if (result != 0)
             {
                 return Array.Empty<LocalListeningPort>();

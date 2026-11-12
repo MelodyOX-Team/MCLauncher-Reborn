@@ -240,11 +240,13 @@
                 HorizontalAlignment="Left" VerticalAlignment="Bottom"
                 Margin="8,0,0,7"/>
 
-        <!-- ===== 状态栏文字 ===== -->
+        <!-- ===== 状态栏文字：限制宽度并裁剪，避免长文本盖住左下角署名 ===== -->
         <TextBlock Grid.Row="1"
                    Text="{Binding StatusText}"
                    Style="{StaticResource OverlayText}"
                    FontSize="12"
+                   MaxWidth="380"
+                   TextTrimming="CharacterEllipsis"
                    HorizontalAlignment="Right" VerticalAlignment="Bottom"
                    Margin="0,0,12,8"/>
 

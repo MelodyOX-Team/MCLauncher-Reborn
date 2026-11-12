@@ -180,8 +180,11 @@ public sealed class LaunchArgumentBuilder
         var variables = BuildVariables(context, classpath);
 
         var jvm = new List<string>();
-        jvm.Add($"-Xmx{Math.Max(64, options.MaxMemoryMb)}M");
-        jvm.Add($"-Xms{Math.Max(16, options.MinMemoryMb)}M");
+        var maxMemory = Math.Max(64, options.MaxMemoryMb);
+        // 初始堆不能大于最大堆，否则 JVM 会直接拒绝启动。
+        var minMemory = Math.Min(Math.Max(16, options.MinMemoryMb), maxMemory);
+        jvm.Add($"-Xmx{maxMemory}M");
+        jvm.Add($"-Xms{minMemory}M");
 
         if (!string.IsNullOrWhiteSpace(context.LogConfigPath))
         {

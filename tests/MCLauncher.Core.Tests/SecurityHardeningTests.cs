@@ -18,7 +18,9 @@ public sealed class SecurityHardeningTests
     {
         if (!OperatingSystem.IsWindows())
         {
-            // DPAPI 只在 Windows 上可用。
+            // DPAPI 只在 Windows 上可用，非 Windows 时跳过。
+            // 项目用的 xunit 2.9.3 没有 Assert.Skip（动态跳过是 v3 的能力），
+            // 也没有引入跳过相关的扩展包，只能直接返回。
             return;
         }
 

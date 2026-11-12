@@ -56,6 +56,7 @@ public sealed class ShellViewModel : ViewModelBase
     private LauncherUpdate? _updateSource;
     private bool _updateReady;
     private bool _isUpdateDrawerOpen;
+    private CancellationTokenSource? _collapseDrawerCts;
 
     public ShellViewModel(
         IEnumerable<NavItem> navItems,
@@ -254,13 +255,36 @@ public sealed class ShellViewModel : ViewModelBase
 
         // 命令是在构造时创建的，那时还没有更新；这里要主动让按钮重新按 CanExecute 求值。
         (UpdateActionCommand as AsyncRelayCommand)?.RaiseCanExecuteChanged();
-        _ = CollapseUpdateDrawerLaterAsync();
+
+        // 每次显示都替换上一轮的收起计时器：旧计时器不取消会在新抽屉刚打开时把它提前收起。
+        _collapseDrawerCts?.Cancel();
+        _collapseDrawerCts?.Dispose();
+        var cts = new CancellationTokenSource();
+        _collapseDrawerCts = cts;
+        _ = CollapseUpdateDrawerLaterAsync(cts);
     }
 
     /// <summary>启动时展示 5 秒，然后自动缩回右侧边缘。</summary>
-    private async Task CollapseUpdateDrawerLaterAsync()
+    private async Task CollapseUpdateDrawerLaterAsync(CancellationTokenSource cts)
     {
-        await Task.Delay(TimeSpan.FromSeconds(5)).ConfigureAwait(true);
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(true);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        finally
+        {
+            if (ReferenceEquals(_collapseDrawerCts, cts))
+            {
+                _collapseDrawerCts = null;
+            }
+
+            cts.Dispose();
+        }
+
         if (_hasUpdate)
         {
             IsUpdateDrawerOpen = false;

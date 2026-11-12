@@ -8,6 +8,12 @@ namespace MCLauncher.Core.Utils;
 /// </summary>
 public static class ArchiveUtil
 {
+    /// <summary>单个压缩包允许解压出的最大字节数（按条目声明的大小累计），防止 zip 炸弹撑爆磁盘。</summary>
+    private const long MaxUncompressedBytes = 2L * 1024 * 1024 * 1024;
+
+    /// <summary>单个压缩包允许的条目数。</summary>
+    private const int MaxEntryCount = 100_000;
+
     /// <summary>常见压缩包魔数判断（zip 的本地文件头以 PK\x03\x04 开头）。</summary>
     public static bool LooksLikeZip(string path)
     {
@@ -46,14 +52,27 @@ public static class ArchiveUtil
         PathUtil.EnsureDirectory(destinationDirectory);
 
         using var archive = ZipFile.OpenRead(archivePath);
-        foreach (var entry in archive.Entries)
-        {
-            if (ShouldSkip(entry, excludePrefixes))
-            {
-                continue;
-            }
+        var extracted = new List<string>();
+        var totalBytes = 0L;
+        var entryCount = 0;
 
-            ExtractEntry(entry, destinationDirectory, overwrite);
+        try
+        {
+            foreach (var entry in archive.Entries)
+            {
+                if (ShouldSkip(entry, excludePrefixes))
+                {
+                    continue;
+                }
+
+                GuardLimits(entry, ref entryCount, ref totalBytes);
+                extracted.Add(ExtractEntry(entry, destinationDirectory, overwrite));
+            }
+        }
+        catch
+        {
+            CleanupExtracted(extracted);
+            throw;
         }
     }
 
@@ -67,14 +86,27 @@ public static class ArchiveUtil
         PathUtil.EnsureDirectory(destinationDirectory);
 
         using var archive = ZipFile.OpenRead(archivePath);
-        foreach (var entry in archive.Entries)
-        {
-            if (ShouldSkipBasic(entry) || !predicate(entry.FullName))
-            {
-                continue;
-            }
+        var extracted = new List<string>();
+        var totalBytes = 0L;
+        var entryCount = 0;
 
-            ExtractEntry(entry, destinationDirectory, overwrite);
+        try
+        {
+            foreach (var entry in archive.Entries)
+            {
+                if (ShouldSkipBasic(entry) || !predicate(entry.FullName))
+                {
+                    continue;
+                }
+
+                GuardLimits(entry, ref entryCount, ref totalBytes);
+                extracted.Add(ExtractEntry(entry, destinationDirectory, overwrite));
+            }
+        }
+        catch
+        {
+            CleanupExtracted(extracted);
+            throw;
         }
     }
 
@@ -86,23 +118,37 @@ public static class ArchiveUtil
     {
         PathUtil.EnsureDirectory(destinationDirectory);
         var blocked = new List<string>();
+        var extracted = new List<string>();
+        var totalBytes = 0L;
+        var entryCount = 0;
 
         using var archive = ZipFile.OpenRead(archivePath);
-        foreach (var entry in archive.Entries)
-        {
-            if (ShouldSkipBasic(entry))
-            {
-                continue;
-            }
 
-            try
+        try
+        {
+            foreach (var entry in archive.Entries)
             {
-                ExtractEntry(entry, destinationDirectory, overwrite: true);
+                if (ShouldSkipBasic(entry))
+                {
+                    continue;
+                }
+
+                GuardLimits(entry, ref entryCount, ref totalBytes);
+
+                try
+                {
+                    extracted.Add(ExtractEntry(entry, destinationDirectory, overwrite: true));
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                {
+                    blocked.Add(entry.FullName);
+                }
             }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                blocked.Add(entry.FullName);
-            }
+        }
+        catch
+        {
+            CleanupExtracted(extracted);
+            throw;
         }
 
         return blocked;
@@ -216,7 +262,7 @@ public static class ArchiveUtil
     private static bool ShouldSkipBasic(ZipArchiveEntry entry) =>
         string.IsNullOrEmpty(entry.Name) || entry.FullName.EndsWith('/');
 
-    private static void ExtractEntry(ZipArchiveEntry entry, string destinationDirectory, bool overwrite)
+    private static string ExtractEntry(ZipArchiveEntry entry, string destinationDirectory, bool overwrite)
     {
         var target = Path.GetFullPath(Path.Combine(destinationDirectory, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
 
@@ -234,11 +280,47 @@ public static class ArchiveUtil
             try
             {
                 entry.ExtractToFile(target, overwrite);
-                return;
+                return target;
             }
             catch (Exception ex) when (attempt < 3 && (ex is IOException or UnauthorizedAccessException))
             {
                 System.Threading.Thread.Sleep(TimeSpan.FromMilliseconds(150 * attempt));
+            }
+        }
+    }
+
+    /// <summary>累计条目数与声明解压大小；超过安全上限时直接中止。</summary>
+    private static void GuardLimits(ZipArchiveEntry entry, ref int entryCount, ref long totalBytes)
+    {
+        entryCount++;
+        totalBytes += entry.Length;
+
+        if (entryCount > MaxEntryCount)
+        {
+            throw new InvalidDataException($"压缩包条目数超过上限（{MaxEntryCount}）：{entry.FullName}");
+        }
+
+        if (totalBytes > MaxUncompressedBytes)
+        {
+            throw new InvalidDataException($"压缩包解压后超过大小上限（{MaxUncompressedBytes} 字节）：{entry.FullName}");
+        }
+    }
+
+    /// <summary>解压失败时删除本次已经写出的文件，避免留下半成品。</summary>
+    private static void CleanupExtracted(IEnumerable<string> files)
+    {
+        foreach (var path in files)
+        {
+            try
+            {
+                if (File.Exists(path))
+                {
+                    File.Delete(path);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // 清理失败无法回滚，至少不要掩盖原始异常。
             }
         }
     }

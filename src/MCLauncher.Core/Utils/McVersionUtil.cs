@@ -66,9 +66,18 @@ public static partial class McVersionUtil
             return false;
         }
 
-        major = int.Parse(match.Groups[1].Value);
-        minor = int.Parse(match.Groups[2].Value);
-        patch = match.Groups[3].Success ? int.Parse(match.Groups[3].Value) : 0;
+        // 版本号来自远端清单，超出 int 范围时按无法解析处理，不能让它抛异常。
+        if (!int.TryParse(match.Groups[1].Value, out major)
+            || !int.TryParse(match.Groups[2].Value, out minor))
+        {
+            return false;
+        }
+
+        if (match.Groups[3].Success && !int.TryParse(match.Groups[3].Value, out patch))
+        {
+            return false;
+        }
+
         return true;
     }
 

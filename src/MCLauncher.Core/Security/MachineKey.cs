@@ -96,7 +96,9 @@ internal static class MachineKey
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static byte[] UnwrapWithTpm(string keyBlob, byte[] wrapped)
     {
-        using var tpm = TpmMachineKey.TryOpen(keyBlob)
+        // 解密路径只能打开已有密钥：TPM 密钥被清除时新建一把会永久解不开旧文件，
+        // 还会掩盖「数据确实已无法恢复」这个事实，让上层误以为还能继续使用账号文件。
+        using var tpm = TpmMachineKey.TryOpenExisting(keyBlob)
                         ?? throw new InvalidOperationException("TPM 密钥不可用，无法解密账号文件");
         return tpm.Unwrap(wrapped);
     }

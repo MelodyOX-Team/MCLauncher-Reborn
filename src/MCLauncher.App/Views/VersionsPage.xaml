@@ -431,6 +431,7 @@
                 <Border Width="640" Background="White" CornerRadius="8" Padding="18,16"
                         HorizontalAlignment="Center" VerticalAlignment="Center"
                         BorderBrush="#D8D8D8" BorderThickness="1"
+                        MaxWidth="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType=Grid}}"
                         MaxHeight="{Binding ActualHeight, RelativeSource={RelativeSource AncestorType=Grid}}"
                         Visibility="{Binding IsInstallDialogOpen, Converter={StaticResource BoolToVis}}">
                     <Grid>

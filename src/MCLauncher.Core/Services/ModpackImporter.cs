@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using MCLauncher.Core.Abstractions;
@@ -212,14 +213,15 @@ public sealed partial class ModpackImporter
         IProgress<InstallProgress>? progress = null,
         CancellationToken ct = default)
     {
-        var info = Inspect(request.ArchivePath);
-
-        _log.Info($"开始导入整合包：{info}");
-
-        PathUtil.EnsureDirectory(request.InstanceDirectory);
-
         try
         {
+            // Inspect 会打开压缩包并解析 manifest，损坏的 zip / JSON 都必须转成失败结果而不是抛出。
+            var info = Inspect(request.ArchivePath);
+
+            _log.Info($"开始导入整合包：{info}");
+
+            PathUtil.EnsureDirectory(request.InstanceDirectory);
+
             return info.Kind switch
             {
                 ModpackKind.Modrinth => await ImportModrinthAsync(request, progress, ct).ConfigureAwait(false),
@@ -491,12 +493,16 @@ public sealed partial class ModpackImporter
         var plan = new List<(string Path, string Url, string? Sha1, long Size)>();
         var warnings = new List<string>();
 
+        // projectId → classId：同一项目可能有多个文件，避免重复查询项目分类。
+        var classIdCache = new Dictionary<int, int>();
+
         foreach (var file in manifest.Files ?? new List<CurseForgeFile>())
         {
             var resolved = await ResolveCurseForgeFileAsync(
                 file.ProjectId,
                 file.FileId,
                 request.CurseForgeApiKey!,
+                classIdCache,
                 ct).ConfigureAwait(false);
 
             if (resolved is null)
@@ -533,32 +539,106 @@ public sealed partial class ModpackImporter
         ModpackImportRequest request,
         IProgress<InstallProgress>? progress)
     {
-        // 普通压缩包：找出 .minecraft 前缀后整包解压。
         var entries = ArchiveUtil.ListEntries(request.ArchivePath)
             .Select(e => e.Replace('\\', '/').TrimStart('/'))
             .ToList();
 
-        var prefix = entries
-            .Select(e => e.IndexOf(".minecraft/", StringComparison.OrdinalIgnoreCase))
-            .Where(index => index >= 0)
-            .Select(index => index + ".minecraft/".Length)
-            .DefaultIfEmpty(0)
-            .Max();
+        // 普通包常常把内容包在 .minecraft/ 下，必须真正裁掉这一层后再落盘。
+        var prefix = FindMinecraftPrefix(entries);
 
         progress?.Report(new InstallProgress { Stage = "解压整合包", Completed = 0, Total = 1 });
 
-        ArchiveUtil.ExtractZip(request.ArchivePath, request.InstanceDirectory);
+        var overwritten = ExtractPlainArchive(request, prefix);
 
         progress?.Report(new InstallProgress { Stage = "解压整合包", Completed = 1, Total = 1 });
+
+        var warnings = new List<string>();
+        if (prefix.Length > 0)
+        {
+            warnings.Add($"已裁掉 .minecraft 外层目录后解压（{prefix}）");
+        }
+        else if (entries.Any(e => e.Contains(".minecraft/", StringComparison.OrdinalIgnoreCase)))
+        {
+            warnings.Add("压缩包里存在多个 .minecraft 目录，无法确定裁剪点，已按原样解压。");
+        }
 
         return new ModpackImportResult
         {
             Success = true,
-            Overwritten = entries.Count,
-            Warnings = prefix > 0
-                ? new List<string> { "压缩包里带 .minecraft 外层目录，已按原样解压；如结构不对请手动整理一层。" }
-                : new List<string>(),
+            Overwritten = overwritten,
+            Warnings = warnings,
         };
+    }
+
+    /// <summary>
+    /// 找出普通压缩包里统一的 <c>…/.minecraft/</c> 前缀。没有或存在多个不同前缀时返回空串（保持原样更安全）。
+    /// </summary>
+    private static string FindMinecraftPrefix(IReadOnlyList<string> entries)
+    {
+        const string marker = ".minecraft/";
+        string? prefix = null;
+
+        foreach (var entry in entries)
+        {
+            var index = entry.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+            if (index < 0)
+            {
+                continue;
+            }
+
+            var candidate = entry[..(index + marker.Length)];
+            if (prefix is null)
+            {
+                prefix = candidate;
+            }
+            else if (!string.Equals(prefix, candidate, StringComparison.OrdinalIgnoreCase))
+            {
+                return string.Empty;
+            }
+        }
+
+        return prefix ?? string.Empty;
+    }
+
+    /// <summary>按裁剪后的相对路径解压普通压缩包，返回实际写入的文件数。</summary>
+    private static int ExtractPlainArchive(ModpackImportRequest request, string prefix)
+    {
+        var count = 0;
+
+        using var archive = ZipFile.OpenRead(request.ArchivePath);
+        foreach (var entry in archive.Entries)
+        {
+            if (string.IsNullOrEmpty(entry.Name) || entry.FullName.EndsWith('/'))
+            {
+                continue;
+            }
+
+            var name = entry.FullName.Replace('\\', '/').TrimStart('/');
+            var relative = prefix.Length > 0
+                           && name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
+                ? name[prefix.Length..]
+                : name;
+
+            if (relative.Length == 0)
+            {
+                continue;
+            }
+
+            var target = Path.Combine(
+                request.InstanceDirectory,
+                relative.Replace('/', Path.DirectorySeparatorChar));
+
+            if (!PathUtil.IsParentOf(request.InstanceDirectory, target))
+            {
+                continue;
+            }
+
+            PathUtil.EnsureParentDirectory(target);
+            entry.ExtractToFile(target, overwrite: true);
+            count++;
+        }
+
+        return count;
     }
 
     /// <summary>下载计划中的文件到实例目录（按 <c>path</c> 相对路径落位）。</summary>
@@ -702,6 +782,7 @@ public sealed partial class ModpackImporter
         int projectId,
         int fileId,
         string apiKey,
+        IDictionary<int, int> classIdCache,
         CancellationToken ct)
     {
         try
@@ -739,27 +820,94 @@ public sealed partial class ModpackImporter
                 ? value.GetString()
                 : null;
 
-            // CurseForge 不直接给相对路径，按资源类型猜目录。
-            var directory = GuessCurseForgeDirectory(fileName!);
+            // CurseForge 不直接给相对路径，只能按项目分类 / 文件类型猜目录。
+            // 光影包与资源包都是 zip，不能一律放进 resourcepacks。
+            var classId = await GetCurseForgeClassIdAsync(projectId, apiKey, classIdCache, ct)
+                .ConfigureAwait(false);
+            var directory = GuessCurseForgeDirectory(fileName!, classId);
             return (Path.Combine(directory, fileName!), url!, sha1, size);
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _log.Warn($"解析 CurseForge 文件失败（{projectId}/{fileId}）", ex);
             return null;
         }
     }
 
-    private static string GuessCurseForgeDirectory(string fileName)
+    /// <summary>查询项目 classId；失败时缓存 -1，后续按文件名兜底，不再重复请求。</summary>
+    private async Task<int> GetCurseForgeClassIdAsync(
+        int projectId,
+        string apiKey,
+        IDictionary<int, int> classIdCache,
+        CancellationToken ct)
+    {
+        if (classIdCache.TryGetValue(projectId, out var cached))
+        {
+            return cached;
+        }
+
+        var classId = -1;
+        try
+        {
+            var headers = new Dictionary<string, string> { ["x-api-key"] = apiKey };
+            var json = await _downloader.RequestStringAsync(
+                $"https://api.curseforge.com/v1/mods/{projectId}",
+                HttpMethod.Get,
+                null,
+                null,
+                headers,
+                ct).ConfigureAwait(false);
+
+            using var document = JsonDocument.Parse(json);
+            if (document.RootElement.TryGetProperty("data", out var data)
+                && data.TryGetProperty("classId", out var classIdElement))
+            {
+                classId = classIdElement.GetInt32();
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _log.Warn($"查询 CurseForge 项目分类失败：{projectId}", ex);
+        }
+
+        classIdCache[projectId] = classId;
+        return classId;
+    }
+
+    private static string GuessCurseForgeDirectory(string fileName, int classId)
     {
         var extension = Path.GetExtension(fileName).ToLowerInvariant();
-        return extension switch
+
+        if (extension == ".jar")
         {
-            ".jar" => "mods",
-            ".zip" => "resourcepacks",
-            ".litematic" or ".schematic" or ".nbt" => "schematics",
-            _ => "mods",
-        };
+            return "mods";
+        }
+
+        if (extension is ".litematic" or ".schematic" or ".nbt")
+        {
+            return "schematics";
+        }
+
+        if (extension is ".zip" or ".mcpack")
+        {
+            // 6552 = 光影包、12 = 资源包；classId 查不到时按文件名兜底。
+            if (classId == 6552)
+            {
+                return "shaderpacks";
+            }
+
+            if (classId == 12)
+            {
+                return "resourcepacks";
+            }
+
+            var name = Path.GetFileNameWithoutExtension(fileName);
+            return name.Contains("shader", StringComparison.OrdinalIgnoreCase)
+                ? "shaderpacks"
+                : "resourcepacks";
+        }
+
+        return "mods";
     }
 
     private static string? BuildLoaderText(Dictionary<string, string>? dependencies)

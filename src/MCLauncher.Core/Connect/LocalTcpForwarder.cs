@@ -45,16 +45,36 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
             {
                 DualMode = true,
             };
-            listener.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+
+            try
+            {
+                listener.Bind(new IPEndPoint(IPAddress.IPv6Any, 0));
+                listener.Listen(64);
+            }
+            catch
+            {
+                // Bind 或 Listen 失败都要立刻释放，否则回退 IPv4 前会泄漏一个句柄。
+                listener.Dispose();
+                throw;
+            }
         }
         catch (SocketException)
         {
             // 系统未启用 IPv6 时退回 IPv4。
             listener = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp);
-            listener.Bind(new IPEndPoint(IPAddress.Any, 0));
+
+            try
+            {
+                listener.Bind(new IPEndPoint(IPAddress.Any, 0));
+                listener.Listen(64);
+            }
+            catch
+            {
+                listener.Dispose();
+                throw;
+            }
         }
 
-        listener.Listen(64);
         return new LocalTcpForwarder(listener, targetPort);
     }
 
@@ -101,16 +121,33 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
 
             try
             {
+                // 联机是小型交互报文，禁用 Nagle 可减少额外延迟。
+                client.NoDelay = true;
+
                 await upstream
                     .ConnectAsync(IPAddress.Loopback, _targetPort, _cts.Token)
                     .ConfigureAwait(false);
 
+                upstream.NoDelay = true;
+
                 inbound = new NetworkStream(client, ownsSocket: false);
                 outbound = upstream.GetStream();
 
-                var up = PumpAsync(inbound, outbound);
-                var down = PumpAsync(outbound, inbound);
-                await Task.WhenAny(up, down).ConfigureAwait(false);
+                var up = PumpAsync(inbound, outbound, upstream.Client);
+                var down = PumpAsync(outbound, inbound, client);
+
+                // 半关闭：两个方向都读到 EOF 才算结束，单方向 EOF 只关目标的写方向。
+                // 再给一个短暂排空上限，防止对端半开时连接永久占用。
+                try
+                {
+                    await Task.WhenAll(up, down)
+                        .WaitAsync(TimeSpan.FromSeconds(15), _cts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    // 排空超时，交给 finally 关闭两端。
+                }
             }
             catch (Exception ex) when (ex is SocketException or IOException or OperationCanceledException)
             {
@@ -139,7 +176,7 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
         }
     }
 
-    private async Task PumpAsync(NetworkStream source, NetworkStream destination)
+    private async Task PumpAsync(NetworkStream source, NetworkStream destination, Socket destinationSocket)
     {
         var buffer = new byte[64 * 1024];
         try
@@ -149,6 +186,18 @@ public sealed class LocalTcpForwarder : IAsyncDisposable
                 var read = await source.ReadAsync(buffer, _cts.Token).ConfigureAwait(false);
                 if (read <= 0)
                 {
+                    // 源端读到 EOF：只对目标端关写方向，另一方向仍可继续传完剩余数据。
+                    try
+                    {
+                        destinationSocket.Shutdown(SocketShutdown.Send);
+                    }
+                    catch (SocketException)
+                    {
+                    }
+                    catch (ObjectDisposedException)
+                    {
+                    }
+
                     return;
                 }
 

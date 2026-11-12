@@ -43,7 +43,15 @@ public partial class MainWindow : Window
     /// <summary>点击署名：用默认浏览器打开项目主页。</summary>
     private void OnCreditClick(object sender, RoutedEventArgs e)
     {
-        Process.Start(new ProcessStartInfo(ProjectUrl) { UseShellExecute = true });
+        try
+        {
+            Process.Start(new ProcessStartInfo(ProjectUrl) { UseShellExecute = true });
+        }
+        catch (Exception ex)
+        {
+            // 默认浏览器关联损坏或被组策略禁用时不能把整个启动器带崩。
+            System.Diagnostics.Debug.WriteLine($"打开项目主页失败：{ex.Message}");
+        }
     }
 
     /// <summary>窗口创建完成时申请圆角（Windows 11 生效，其它系统静默失败）。</summary>

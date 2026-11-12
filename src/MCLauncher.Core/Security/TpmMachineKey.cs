@@ -25,8 +25,12 @@ internal sealed class TpmMachineKey : IDisposable
         _key = key;
     }
 
-    /// <summary>打开（不存在时创建）一个 TPM 持久化 RSA-2048 密钥；任何失败都返回 null。</summary>
-    public static TpmMachineKey? TryOpen(string keyName)
+    /// <summary>
+    /// 只打开已存在的 TPM 持久化密钥，不创建。
+    /// 解密旧文件时用这个：如果密钥已被清除，必须如实失败，
+    /// 而不是新建一把永远解不开旧数据的密钥。
+    /// </summary>
+    public static TpmMachineKey? TryOpenExisting(string keyName)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -40,28 +44,59 @@ internal sealed class TpmMachineKey : IDisposable
                 return null;
             }
 
-            var status = NCryptOpenKey(provider, out var key, keyName, 0, 0);
+            if (NCryptOpenKey(provider, out var key, keyName, 0, 0) != 0)
+            {
+                NCryptFreeObject(provider);
+                return null;
+            }
+
+            return new TpmMachineKey(provider, key);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>打开（不存在时创建）一个 TPM 持久化 RSA-2048 密钥；任何失败都返回 null。</summary>
+    public static TpmMachineKey? TryOpen(string keyName)
+    {
+        var existing = TryOpenExisting(keyName);
+        if (existing is not null)
+        {
+            return existing;
+        }
+
+        if (!OperatingSystem.IsWindows())
+        {
+            return null;
+        }
+
+        try
+        {
+            if (NCryptOpenStorageProvider(out var provider, ProviderName, 0) != 0)
+            {
+                return null;
+            }
+
+            var status = NCryptCreatePersistedKey(provider, out var key, RsaAlgorithm, keyName, 0, 0);
             if (status != 0)
             {
-                status = NCryptCreatePersistedKey(provider, out key, RsaAlgorithm, keyName, 0, 0);
-                if (status != 0)
-                {
-                    NCryptFreeObject(provider);
-                    return null;
-                }
+                NCryptFreeObject(provider);
+                return null;
+            }
 
-                // 长度尽力设置为 2048；不要设置 KeyUsage：部分固件（如 Intel PTT）不支持
-                // 创建时设置该属性（0x80090029 NTE_NOT_SUPPORTED），而默认创建的 RSA 密钥本来就允许解密。
-                // 密钥是否真的可用由 MachineKey.Wrap 的「加密后回解验证」兜底，此处宽松即可。
-                SetDwordProperty(key, LengthProperty, 2048);
+            // 长度尽力设置为 2048；不要设置 KeyUsage：部分固件（如 Intel PTT）不支持
+            // 创建时设置该属性（0x80090029 NTE_NOT_SUPPORTED），而默认创建的 RSA 密钥本来就允许解密。
+            // 密钥是否真的可用由 MachineKey.Wrap 的「加密后回解验证」兜底，此处宽松即可。
+            SetDwordProperty(key, LengthProperty, 2048);
 
-                if (NCryptFinalizeKey(key, 0) != 0)
-                {
-                    NCryptDeleteKey(key, 0);
-                    NCryptFreeObject(key);
-                    NCryptFreeObject(provider);
-                    return null;
-                }
+            if (NCryptFinalizeKey(key, 0) != 0)
+            {
+                NCryptDeleteKey(key, 0);
+                NCryptFreeObject(key);
+                NCryptFreeObject(provider);
+                return null;
             }
 
             return new TpmMachineKey(provider, key);

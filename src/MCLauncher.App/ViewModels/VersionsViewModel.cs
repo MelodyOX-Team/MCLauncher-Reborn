@@ -181,6 +181,7 @@ public sealed class VersionsViewModel : ViewModelBase
     private string _installSpeedText = string.Empty;
     private readonly Dictionary<string, InstallFileItem> _installFileRows = new(StringComparer.Ordinal);
     private bool _isLoadingLoaderVersions;
+    private int _loaderVersionRequest;
 
     private bool _isModpackDialogOpen;
     private bool _isModpackPickerOpen;
@@ -312,8 +313,12 @@ public sealed class VersionsViewModel : ViewModelBase
 
             if (value is not null)
             {
-                _stack.Config.Settings.SelectedInstanceId = value.Id;
-                _stack.Config.Save();
+                // ApplyFilterCore 每次重建行都会重新赋值选中项；Id 没变时不必反复写盘。
+                if (!string.Equals(_stack.Config.Settings.SelectedInstanceId, value.Id, StringComparison.OrdinalIgnoreCase))
+                {
+                    _stack.Config.Settings.SelectedInstanceId = value.Id;
+                    _stack.Config.Save();
+                }
             }
 
             foreach (var row in Instances)
@@ -417,6 +422,10 @@ public sealed class VersionsViewModel : ViewModelBase
             {
                 SetDefaultInstanceName(DefaultInstanceName(value, _selectedLoaderCard?.Kind));
             }
+
+            // 换了 Minecraft 版本后旧的加载器版本一定不适用；先清空，避免确认安装时把旧版本带进去。
+            SelectedLoaderVersion = null;
+            LoaderVersions.Clear();
 
             if (_selectedLoaderCard is not null)
             {
@@ -1156,7 +1165,25 @@ public sealed class VersionsViewModel : ViewModelBase
         }
 
         OnPropertyChanged(nameof(SelectedMinecraftVersion));
-        SetDefaultInstanceName(DefaultInstanceName(_selectedMinecraftVersion, _selectedLoaderCard?.Kind));
+
+        // 用户已经手动输入过实例名，勾选版本过滤条件时不要用默认名覆盖它。
+        if (!_instanceNameTouched)
+        {
+            SetDefaultInstanceName(DefaultInstanceName(_selectedMinecraftVersion, _selectedLoaderCard?.Kind));
+        }
+
+        // 过滤后选中的版本被动换了，同样要清掉旧版本的加载器版本并重新拉取。
+        if (IsInstallDialogOpen && !string.Equals(previous, _selectedMinecraftVersion, StringComparison.Ordinal))
+        {
+            SelectedLoaderVersion = null;
+            LoaderVersions.Clear();
+
+            if (_selectedLoaderCard is not null)
+            {
+                _ = LoadLoaderVersionsAsync();
+            }
+        }
+
         RaiseInstallState();
     }
 
@@ -1247,6 +1274,8 @@ public sealed class VersionsViewModel : ViewModelBase
             return;
         }
 
+        // 每次请求一个代号：并发请求只让最后一次更新界面与忙碌状态。
+        var request = ++_loaderVersionRequest;
         var kind = card.Kind;
         _isLoadingLoaderVersions = true;
         RaiseInstallState();
@@ -1260,7 +1289,9 @@ public sealed class VersionsViewModel : ViewModelBase
         {
             var versions = await Task.Run(() => _stack.ModLoaders.ListLoaderVersionsAsync(kind, gameVersion!));
 
-            if (SelectedLoaderCard?.Kind != kind || SelectedMinecraftVersion != gameVersion)
+            if (request != _loaderVersionRequest
+                || SelectedLoaderCard?.Kind != kind
+                || SelectedMinecraftVersion != gameVersion)
             {
                 return;
             }
@@ -1282,15 +1313,25 @@ public sealed class VersionsViewModel : ViewModelBase
         }
         catch (Exception ex)
         {
+            // 已被更新的请求取代时别再改界面，把状态留给最后一次请求。
+            if (request != _loaderVersionRequest)
+            {
+                return;
+            }
+
             _stack.Log.Error($"获取 {card.Title} 版本失败", ex);
             card.Status = "获取失败";
             InstallStatus = $"获取 {card.Title} 版本失败：{ex.Message}";
         }
         finally
         {
-            _isLoadingLoaderVersions = false;
-            UpdateLoaderCards();
-            RaiseInstallState();
+            // 共享布尔不能由旧请求复位，否则新请求还没回来就被当成「已加载完成」。
+            if (request == _loaderVersionRequest)
+            {
+                _isLoadingLoaderVersions = false;
+                UpdateLoaderCards();
+                RaiseInstallState();
+            }
         }
     }
 

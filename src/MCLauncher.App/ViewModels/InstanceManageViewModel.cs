@@ -230,6 +230,7 @@ public sealed class InstanceManageViewModel : ViewModelBase
     private string _updateSpeedText = string.Empty;
     private readonly ObservableCollection<ResourceUpdateItem> _updateItems = new();
     private int _scanVersion;
+    private int _updateCheckVersion;
     private IReadOnlyDictionary<string, ResourceUpdateInfo> _updatesByPath =
         new Dictionary<string, ResourceUpdateInfo>(StringComparer.OrdinalIgnoreCase);
 
@@ -642,6 +643,11 @@ public sealed class InstanceManageViewModel : ViewModelBase
     {
         var changed = !string.Equals(_instanceId, versionId, StringComparison.OrdinalIgnoreCase);
 
+        // 重新进入实例管理页时旧实例的检查结果一律作废：递增代号让在途请求回包后自行丢弃，
+        // 并复位忙碌标记，否则新实例的检查会被旧的「正在检查」挡住。
+        _updateCheckVersion++;
+        IsCheckingUpdates = false;
+
         _instanceId = versionId;
         _isolated = _stack.IsIsolated(versionId);
         _instanceDirectory = _stack.GetInstanceDirectory(versionId, _isolated);
@@ -657,6 +663,7 @@ public sealed class InstanceManageViewModel : ViewModelBase
         {
             Download.Close();
             ResetUpdateDialogState();
+            IsUpdateDialogOpen = false;
             _updatesByPath = new Dictionary<string, ResourceUpdateInfo>(StringComparer.OrdinalIgnoreCase);
             SearchText = string.Empty;
             _selectedTab = Tabs[0];
@@ -896,6 +903,10 @@ public sealed class InstanceManageViewModel : ViewModelBase
             return;
         }
 
+        // 记录本次检查针对的实例与请求代号：回包时要确认还是同一个实例、同一次检查。
+        var check = ++_updateCheckVersion;
+        var instanceId = _instanceId;
+
         _updatesByPath = new Dictionary<string, ResourceUpdateInfo>(StringComparer.OrdinalIgnoreCase);
         ApplyFilter();
         ResetUpdateDialogState();
@@ -920,8 +931,15 @@ public sealed class InstanceManageViewModel : ViewModelBase
                 progress,
                 CancellationToken.None);
 
-            // 检查期间玩家切走了页签，结果属于旧页签，直接丢弃并收起弹窗。
-            if (SelectedTab?.Kind != kind)
+            // 已有更新的检查接手时，弹窗与结果都归新请求管理，这里只丢弃旧结果。
+            if (check != _updateCheckVersion)
+            {
+                return;
+            }
+
+            // 检查期间玩家切走了页签或切到了别的实例，结果已不属于当前页面，丢弃并收起弹窗。
+            if (!string.Equals(_instanceId, instanceId, StringComparison.OrdinalIgnoreCase)
+                || SelectedTab?.Kind != kind)
             {
                 IsUpdateDialogOpen = false;
                 return;
@@ -949,12 +967,21 @@ public sealed class InstanceManageViewModel : ViewModelBase
         catch (Exception ex)
         {
             _stack.Log.Error("检查资源更新失败", ex);
-            UpdateDialogStatus = "检查失败：" + ex.Message;
-            StatusText = UpdateDialogStatus;
+
+            // 结果已过期的请求不再改界面，把状态留给当前那次检查。
+            if (check == _updateCheckVersion)
+            {
+                UpdateDialogStatus = "检查失败：" + ex.Message;
+                StatusText = UpdateDialogStatus;
+            }
         }
         finally
         {
-            IsCheckingUpdates = false;
+            // 旧请求不能复位新请求的忙碌状态。
+            if (check == _updateCheckVersion)
+            {
+                IsCheckingUpdates = false;
+            }
         }
     }
 

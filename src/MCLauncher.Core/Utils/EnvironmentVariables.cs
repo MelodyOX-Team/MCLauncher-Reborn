@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace MCLauncher.Core.Utils;
 
 /// <summary>
@@ -25,14 +27,30 @@ public static class EnvironmentVariables
             var separator = line.IndexOf('=');
             if (separator <= 0)
             {
+                Debug.WriteLine($"已忽略环境变量（缺少名称=值格式）：{line}");
                 continue;
             }
 
             var name = line[..separator].Trim();
             var value = line[(separator + 1)..].Trim();
 
-            if (name.Length == 0 || name.Contains('\0'))
+            // 在这里就挡掉非法名称/值：ProcessStartInfo 要到启动进程时才报错，
+            // 那时错误信息完全指不到是哪一行配置写错了。
+            if (name.Length == 0)
             {
+                Debug.WriteLine($"已忽略环境变量（名称为空）：{line}");
+                continue;
+            }
+
+            if (name.Contains('=') || name.Contains('\0'))
+            {
+                Debug.WriteLine($"已忽略环境变量（名称含非法字符）：{name}");
+                continue;
+            }
+
+            if (value.Contains('\0'))
+            {
+                Debug.WriteLine($"已忽略环境变量（值含 NUL 字符）：{name}");
                 continue;
             }
 

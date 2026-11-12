@@ -59,6 +59,16 @@ public sealed class LauncherUpdater
         PathUtil.EnsureParentDirectory(target);
 
         var checker = new FileChecker { Size = asset.Size, Sha256 = asset.Sha256 };
+
+        // 暂存目录可能残留上一次（甚至旧版本）的安装包；校验不通过时先删掉再下载，
+        // 避免断点续传把陈旧文件当成同一次下载继续拼。
+        if (File.Exists(target) && !checker.Check(target))
+        {
+            _log.Info("暂存的更新文件校验不通过，已删除并重新下载");
+            TryDelete(target);
+            TryDelete(target + ".part");
+        }
+
         var outcome = await _downloader
             .DownloadAsync(
                 new[] { new DownloadCandidate(asset.Url, "GitHub") },

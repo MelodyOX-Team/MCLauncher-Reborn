@@ -10,10 +10,17 @@ namespace MCLauncher.Core.Services.Auth;
 /// <summary>外置登录（authlib-injector / Yggdrasil）失败。消息可直接展示给用户。</summary>
 public sealed class AuthlibAuthException : Exception
 {
-    public AuthlibAuthException(string message, Exception? inner = null)
+    public AuthlibAuthException(string message, Exception? inner = null, string? errorCode = null)
         : base(message, inner)
     {
+        ErrorCode = errorCode;
     }
+
+    /// <summary>
+    /// 服务器返回的 Yggdrasil 错误码（如 <c>ForbiddenOperationException</c>）。
+    /// 调用方需要据此区分「账号确实被拒绝」和「这次响应读不懂」，不能只看异常消息。
+    /// </summary>
+    public string? ErrorCode { get; }
 }
 
 /// <summary>认证服务器根路径返回的元数据。</summary>
@@ -99,10 +106,15 @@ public sealed class AuthlibAuthService
             json = await _downloader
                 .RequestStringAsync(root, HttpMethod.Get, null, null, null, ct)
                 .ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
         }
         catch (HttpApiException ex)
         {
             throw new AuthlibAuthException($"无法访问认证服务器（HTTP {(int)ex.StatusCode}）：{root}", ex);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -169,6 +181,8 @@ public sealed class AuthlibAuthService
         });
 
         var json = await PostAsync($"{root}/authserver/authenticate", payload, "登录", ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+
         var response = JsonSerializer.Deserialize<YggdrasilAuthResponse>(json)
                        ?? throw new AuthlibAuthException("认证服务器响应无法解析");
 
@@ -225,11 +239,17 @@ public sealed class AuthlibAuthService
             await _downloader
                 .PostJsonAsync($"{NormalizeUrl(account.AuthServer!)}/authserver/validate", payload, null, ct)
                 .ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
             return true;
         }
         catch (HttpApiException ex) when (ex.StatusCode is HttpStatusCode.Forbidden or HttpStatusCode.BadRequest)
         {
             return false;
+        }
+        catch (OperationCanceledException)
+        {
+            // 取消不是「令牌无效」：吞掉会让调用方继续拿已取消的令牌去刷新或启动。
+            throw;
         }
         catch (Exception ex)
         {
@@ -261,6 +281,7 @@ public sealed class AuthlibAuthService
             json = await _downloader
                 .PostJsonAsync($"{root}/authserver/refresh", payload, null, ct)
                 .ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
         }
         catch (HttpApiException ex)
         {
@@ -275,21 +296,35 @@ public sealed class AuthlibAuthService
             throw new AuthlibAuthException("外置登录已失效，请重新登录");
         }
 
-        account.AccessToken = response.AccessToken;
-        if (!string.IsNullOrWhiteSpace(response.ClientToken))
+        // 不原地修改传入的 Account：调用方（账号列表 / 健康检查）可能仍持有旧实例，
+        // 原地改会让「刷新失败但对象已被改脏」的情况无法回滚。返回新实例由调用方 Upsert。
+        var refreshed = new Account
         {
-            account.ClientToken = response.ClientToken;
-        }
+            Kind = account.Kind,
+            Name = account.Name,
+            Uuid = account.Uuid,
+            AccessToken = response.AccessToken,
+            Xuid = account.Xuid,
+            XboxName = account.XboxName,
+            RefreshToken = account.RefreshToken,
+            AuthServer = account.AuthServer,
+            AuthServerName = account.AuthServerName,
+            ClientToken = string.IsNullOrWhiteSpace(response.ClientToken) ? account.ClientToken : response.ClientToken,
+            ExpiresAt = account.ExpiresAt,
+            IsDisabled = account.IsDisabled,
+            DisabledReason = account.DisabledReason,
+            ClientId = account.ClientId,
+        };
 
         var profile = response.SelectedProfile ?? response.AvailableProfiles?.FirstOrDefault();
         if (profile?.Id is { Length: > 0 } id && profile.Name is { Length: > 0 } name)
         {
-            account.Uuid = id.ToLowerInvariant();
-            account.Name = name;
+            refreshed.Uuid = id.ToLowerInvariant();
+            refreshed.Name = name;
         }
 
-        _log.Info($"外置登录令牌已续期：{account.Name}（{account.AuthServerName}）");
-        return account;
+        _log.Info($"外置登录令牌已续期：{refreshed.Name}（{refreshed.AuthServerName}）");
+        return refreshed;
     }
 
     /// <summary>启动前保证令牌可用：先校验，失效再续期；续期也失败则要求重新登录。</summary>
@@ -297,10 +332,13 @@ public sealed class AuthlibAuthService
     {
         if (await ValidateAsync(account, ct).ConfigureAwait(false))
         {
+            ct.ThrowIfCancellationRequested();
             return account;
         }
 
-        return await RefreshAsync(account, ct).ConfigureAwait(false);
+        var refreshed = await RefreshAsync(account, ct).ConfigureAwait(false);
+        ct.ThrowIfCancellationRequested();
+        return refreshed;
     }
 
     /// <summary>去掉结尾斜杠，保证拼端点时不会出现双斜杠。</summary>
@@ -310,7 +348,9 @@ public sealed class AuthlibAuthService
     {
         try
         {
-            return await _downloader.PostJsonAsync(url, payload, null, ct).ConfigureAwait(false);
+            var json = await _downloader.PostJsonAsync(url, payload, null, ct).ConfigureAwait(false);
+            ct.ThrowIfCancellationRequested();
+            return json;
         }
         catch (HttpApiException ex)
         {
@@ -346,7 +386,8 @@ public sealed class AuthlibAuthService
             _ => message,
         };
 
-        return new AuthlibAuthException(message, ex);
+        return new AuthlibAuthException(
+            message, ex, string.IsNullOrWhiteSpace(code) ? null : code);
     }
 
     private sealed class YggdrasilAuthResponse
