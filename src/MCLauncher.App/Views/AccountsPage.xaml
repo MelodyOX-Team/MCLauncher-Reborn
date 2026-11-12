@@ -399,13 +399,13 @@
                                         </DataTemplate>
                                     </GridViewColumn.CellTemplate>
                                 </GridViewColumn>
-                                <GridViewColumn Width="42">
+                                <GridViewColumn Width="56">
                                     <GridViewColumn.CellTemplate>
                                         <DataTemplate>
                                             <Button Style="{StaticResource AccountIconButton}"
                                                     Content="&#xE72C;"
                                                     ToolTip="检查该账号是否可用"
-                                                    HorizontalAlignment="Left" Margin="8,0,0,0"
+                                                    HorizontalAlignment="Left" Margin="4,0,0,0"
                                                     Visibility="{Binding CanCheck, Converter={StaticResource BoolToVis}}"
                                                     IsEnabled="{Binding DataContext.CanCheckAccounts, RelativeSource={RelativeSource AncestorType=UserControl}}"
                                                     Command="{Binding DataContext.CheckAccountCommand, RelativeSource={RelativeSource AncestorType=UserControl}}"
