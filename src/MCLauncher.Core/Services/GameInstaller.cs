@@ -304,6 +304,10 @@ public sealed class GameInstaller
     {
         options ??= new InstallOptions();
 
+        // 启动前的校验绝大多数情况没有缺失文件，文案用「检查」避免被当成重新下载。
+        var indexStage = options.ReportAsCheck ? "检查资源索引" : "下载资源索引";
+        var filesStage = options.ReportAsCheck ? "检查游戏文件" : "下载游戏文件";
+
         // 合并继承链后拿到的才是可直接安装的自洽版本。
         var version = _repository.Resolve(gameDirectory, versionId);
 
@@ -342,9 +346,9 @@ public sealed class GameInstaller
 
         if (preRequests.Count > 0)
         {
-            Report(progress, "下载资源索引", 0, preRequests.Count, 0, 0, null);
+            Report(progress, indexStage, 0, preRequests.Count, 0, 0, null);
             var preResult = await _batch
-                .RunAsync(preRequests, options.MaxParallel, Wrap(progress, "下载资源索引", preRequests.Count), ct)
+                .RunAsync(preRequests, options.MaxParallel, Wrap(progress, indexStage, preRequests.Count), ct)
                 .ConfigureAwait(false);
 
             if (!preResult.Success)
@@ -399,9 +403,9 @@ public sealed class GameInstaller
             requests.AddRange(BuildAssetRequests(gameDirectory, indexInfo, options));
         }
 
-        Report(progress, "下载游戏文件", 0, requests.Count, 0, 0, null);
+        Report(progress, filesStage, 0, requests.Count, 0, 0, null);
         var mainResult = await _batch
-            .RunAsync(requests, options.MaxParallel, Wrap(progress, "下载游戏文件", requests.Count), ct)
+            .RunAsync(requests, options.MaxParallel, Wrap(progress, filesStage, requests.Count), ct)
             .ConfigureAwait(false);
 
         downloaded += mainResult.Completed;

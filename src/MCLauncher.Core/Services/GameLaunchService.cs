@@ -80,7 +80,7 @@ public sealed class GameLaunchService
                 .EnsureCompleteAsync(
                     request.GameRoot,
                     request.VersionId,
-                    new InstallOptions { DownloadAssets = true },
+                    new InstallOptions { DownloadAssets = true, ReportAsCheck = true },
                     progress,
                     ct)
                 .ConfigureAwait(false);

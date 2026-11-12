@@ -25,6 +25,12 @@ public sealed class InstallOptions
 
     /// <summary>强制重新下载（无视已存在文件）。</summary>
     public bool ForceRedownload { get; init; }
+
+    /// <summary>
+    /// 阶段文案按「检查」而不是「下载」报告。启动前校验时文件通常已经齐全，
+    /// 仍显示「下载资源索引 / 下载游戏文件」会让用户误以为每次启动都在重新下载。
+    /// </summary>
+    public bool ReportAsCheck { get; init; }
 }
 
 /// <summary>安装过程中的阶段性进度。</summary>
