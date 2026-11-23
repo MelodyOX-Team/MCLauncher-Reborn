@@ -360,7 +360,15 @@ public partial class App : Application
     private static string CurrentVersion()
     {
         var version = typeof(App).Assembly.GetName().Version;
-        return version is null ? "0.0.0" : $"{version.Major}.{version.Minor}.{version.Build}";
+        if (version is null)
+        {
+            return "0.0.0";
+        }
+
+        // 6.0.0.x 这种四位版本必须带上 Revision，否则更新检查会把 6.0.0.1 当成 6.0.0 反复提示。
+        return version.Revision > 0
+            ? $"{version.Major}.{version.Minor}.{version.Build}.{version.Revision}"
+            : $"{version.Major}.{version.Minor}.{version.Build}";
     }
 
     /// <summary>发布说明是多行 Markdown，横幅只保留一段单行摘要。</summary>

@@ -88,6 +88,19 @@ public sealed class ModLoaderLiveTests
     }
 
     [Fact]
+    public async Task NeoForge版本列表可用()
+    {
+        using var temp = new TempDirectory();
+        using var stack = LiveTestStack.Create(Path.Combine(temp.Path, ".cache"));
+        using var cts = new CancellationTokenSource(Timeout);
+
+        var versions = await stack.ModLoaders.ListLoaderVersionsAsync(ModLoaderKind.NeoForge, "1.20.4", cts.Token);
+
+        Assert.NotEmpty(versions);
+        Assert.All(versions, v => Assert.StartsWith("20.4.", v.Version));
+    }
+
+    [Fact]
     public async Task Forge版本列表可用()
     {
         using var temp = new TempDirectory();

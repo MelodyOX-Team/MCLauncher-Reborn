@@ -87,7 +87,7 @@ internal sealed class LiveTestStack : IDisposable
             Launcher = launcher,
             LaunchService = new GameLaunchService(
                 repository, installer, java, argumentBuilder, launcher, authlibAuth, authlibInjector, log),
-            ModLoaders = new ModLoaderService(downloader, repository, installer, forgeInstaller, log),
+            ModLoaders = new ModLoaderService(downloader, resolver, repository, installer, forgeInstaller, log),
             Instances = new InstanceService(repository, config, manifests, log),
         };
     }

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using MCLauncher.Core.Abstractions;
 using MCLauncher.Core.Models;
@@ -84,6 +85,7 @@ public sealed partial class ModLoaderService
     private const string NeoForgeMetadataUrl = "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge";
 
     private readonly HttpDownloader _downloader;
+    private readonly DownloadSourceResolver _resolver;
     private readonly VersionRepository _repository;
     private readonly GameInstaller _installer;
     private readonly ForgeInstallerService _forgeInstaller;
@@ -91,12 +93,14 @@ public sealed partial class ModLoaderService
 
     public ModLoaderService(
         HttpDownloader downloader,
+        DownloadSourceResolver resolver,
         VersionRepository repository,
         GameInstaller installer,
         ForgeInstallerService forgeInstaller,
         ILogger log)
     {
         _downloader = downloader;
+        _resolver = resolver;
         _repository = repository;
         _installer = installer;
         _forgeInstaller = forgeInstaller;
@@ -167,9 +171,8 @@ public sealed partial class ModLoaderService
 
     private async Task<IReadOnlyList<LoaderVersionOption>> ListFabricLikeAsync(string metaBase, CancellationToken ct)
     {
-        var json = await _downloader
-            .RequestStringAsync(metaBase + "/versions/loader", HttpMethod.Get, null, null, null, ct)
-            .ConfigureAwait(false);
+        var candidates = _resolver.Resolve(metaBase + "/versions/loader", DownloadUrlKind.ModLoaderMetadata);
+        var json = await GetMetadataAsync(candidates, ct).ConfigureAwait(false);
 
         var items = JsonUtil.Deserialize<List<FabricLoaderEntry>>(json) ?? new List<FabricLoaderEntry>();
 
@@ -190,9 +193,8 @@ public sealed partial class ModLoaderService
         var baseUrl = kind == ModLoaderKind.Quilt ? QuiltMetaBase : FabricMetaBase;
         try
         {
-            var json = await _downloader
-                .RequestStringAsync(baseUrl + "/versions/game", HttpMethod.Get, null, null, null, ct)
-                .ConfigureAwait(false);
+            var candidates = _resolver.Resolve(baseUrl + "/versions/game", DownloadUrlKind.ModLoaderMetadata);
+            var json = await GetMetadataAsync(candidates, ct).ConfigureAwait(false);
 
             var games = JsonUtil.Deserialize<List<FabricGameEntry>>(json) ?? new List<FabricGameEntry>();
             return games.Any(g => string.Equals(g.Version, gameVersion, StringComparison.OrdinalIgnoreCase));
@@ -204,41 +206,30 @@ public sealed partial class ModLoaderService
         }
     }
 
+    /// <summary>
+    /// 取加载器元数据：镜像优先时并行竞速，官方优先时按候选顺序回退。
+    /// </summary>
+    private Task<string> GetMetadataAsync(IReadOnlyList<DownloadCandidate> candidates, CancellationToken ct) =>
+        _resolver.PreferMirrorForVersionList
+            ? _downloader.GetStringRaceAsync(candidates, ct)
+            : _downloader.GetStringAsync(candidates, ct);
+
     private async Task<IReadOnlyList<LoaderVersionOption>> ListForgeAsync(string gameVersion, CancellationToken ct)
     {
-        var xml = await _downloader
-            .RequestStringAsync(ForgeMetadataUrl, HttpMethod.Get, null, null, null, ct)
-            .ConfigureAwait(false);
+        // 版本列表与推荐版本互不依赖，并行取；推荐版本失败不影响列表。
+        var versionsTask = FetchForgeVersionsAsync(gameVersion, ct);
+        var promosTask = FetchForgePromotionsAsync(ct);
+        await Task.WhenAll(versionsTask, promosTask).ConfigureAwait(false);
 
-        var recommended = string.Empty;
-        var latest = string.Empty;
+        var versions = await versionsTask.ConfigureAwait(false);
+        var promos = await promosTask.ConfigureAwait(false);
+        var recommended = promos.GetValueOrDefault($"{gameVersion}-recommended") ?? string.Empty;
+        var latest = promos.GetValueOrDefault($"{gameVersion}-latest") ?? string.Empty;
 
-        try
+        var result = new List<LoaderVersionOption>(versions.Count);
+
+        foreach (var version in versions)
         {
-            var promos = JsonUtil.Deserialize<ForgePromotions>(
-                await _downloader.RequestStringAsync(ForgePromotionsUrl, HttpMethod.Get, null, null, null, ct).ConfigureAwait(false));
-
-            recommended = promos?.Promos?.GetValueOrDefault($"{gameVersion}-recommended") ?? string.Empty;
-            latest = promos?.Promos?.GetValueOrDefault($"{gameVersion}-latest") ?? string.Empty;
-        }
-        catch (Exception ex)
-        {
-            _log.Warn("获取 Forge 推荐版本失败（不影响列表）", ex);
-        }
-
-        var prefix = gameVersion + "-";
-        var result = new List<LoaderVersionOption>();
-
-        foreach (Match match in MavenVersionPattern().Matches(xml))
-        {
-            var full = match.Groups[1].Value.Trim();
-            if (!full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            var version = full[prefix.Length..];
-
             // maven 里同一个 Forge 构建可能带 "-<原版版本>" 后缀（只有这种制品才含 universal jar），
             // 和 promotions 的推荐号比较时要把后缀去掉，否则 1.7.10 这种永远匹配不到推荐版本。
             var comparable = StripGameVersionSuffix(version, gameVersion);
@@ -257,25 +248,253 @@ public sealed partial class ModLoaderService
             .ToList();
     }
 
+    /// <summary>
+    /// 获取 Forge 版本列表。镜像有专用的 <c>/forge/minecraft/&lt;原版&gt;</c> 接口，
+    /// 返回的 JSON 与官方 maven-metadata.xml 结构不同，这里按响应内容选择解析方式。
+    /// </summary>
+    private async Task<List<string>> FetchForgeVersionsAsync(string gameVersion, CancellationToken ct)
+    {
+        var candidates = new List<DownloadCandidate>();
+        foreach (var (baseUrl, name) in _resolver.GetMirrorBases())
+        {
+            candidates.Add(new DownloadCandidate(
+                $"{baseUrl}/forge/minecraft/{Uri.EscapeDataString(gameVersion)}", $"{name}(Forge)"));
+        }
+
+        candidates.Add(new DownloadCandidate(ForgeMetadataUrl, "Forge 官方源"));
+        if (!_resolver.PreferMirrorForVersionList)
+        {
+            MoveOfficialFirst(candidates);
+        }
+
+        var text = await GetMetadataAsync(candidates, ct).ConfigureAwait(false);
+        return ParseForgeVersions(text, gameVersion);
+    }
+
+    private async Task<Dictionary<string, string>> FetchForgePromotionsAsync(CancellationToken ct)
+    {
+        try
+        {
+            var candidates = new List<DownloadCandidate>();
+            foreach (var (baseUrl, name) in _resolver.GetMirrorBases())
+            {
+                candidates.Add(new DownloadCandidate(baseUrl + "/forge/promos", $"{name}(Forge Promos)"));
+            }
+
+            candidates.Add(new DownloadCandidate(ForgePromotionsUrl, "Forge 官方源"));
+            if (!_resolver.PreferMirrorForVersionList)
+            {
+                MoveOfficialFirst(candidates);
+            }
+
+            var json = await GetMetadataAsync(candidates, ct).ConfigureAwait(false);
+            return ParseForgePromotions(json);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _log.Warn("获取 Forge 推荐版本失败（不影响列表）", ex);
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
+    private static List<string> ParseForgeVersions(string text, string gameVersion)
+    {
+        var trimmed = text.TrimStart();
+        if (trimmed.StartsWith('<'))
+        {
+            return ParseForgeMavenVersions(text, gameVersion);
+        }
+
+        var entries = JsonUtil.Deserialize<List<ForgeVersionEntry>>(text) ?? new List<ForgeVersionEntry>();
+        var prefix = gameVersion + "-";
+        var result = new List<string>();
+
+        foreach (var entry in entries)
+        {
+            var version = entry.Version?.Trim();
+            if (string.IsNullOrWhiteSpace(version))
+            {
+                continue;
+            }
+
+            if (version.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                version = version[prefix.Length..];
+            }
+
+            result.Add(version);
+        }
+
+        return result.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+    }
+
+    private static List<string> ParseForgeMavenVersions(string xml, string gameVersion)
+    {
+        var prefix = gameVersion + "-";
+        var result = new List<string>();
+
+        foreach (Match match in MavenVersionPattern().Matches(xml))
+        {
+            var full = match.Groups[1].Value.Trim();
+            if (full.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(full[prefix.Length..]);
+            }
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 解析 Forge 推荐版本。官方 promotions_slim.json 是 <c>{ "promos": { ... } }</c>，
+    /// 镜像 <c>/forge/promos</c> 是 <c>[{ name, build: { version } }]</c>，两种都要认。
+    /// </summary>
+    private static Dictionary<string, string> ParseForgePromotions(string json)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+
+        if (root.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in root.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object
+                    || !item.TryGetProperty("name", out var nameElement)
+                    || !item.TryGetProperty("build", out var buildElement)
+                    || buildElement.ValueKind != JsonValueKind.Object
+                    || !buildElement.TryGetProperty("version", out var versionElement))
+                {
+                    continue;
+                }
+
+                var name = nameElement.GetString();
+                var version = versionElement.GetString();
+                if (!string.IsNullOrWhiteSpace(name) && !string.IsNullOrWhiteSpace(version))
+                {
+                    result[name] = version;
+                }
+            }
+        }
+        else if (root.ValueKind == JsonValueKind.Object
+                 && root.TryGetProperty("promos", out var promos)
+                 && promos.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var property in promos.EnumerateObject())
+            {
+                if (property.Value.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var version = property.Value.GetString();
+                if (!string.IsNullOrWhiteSpace(version))
+                {
+                    result[property.Name] = version;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    private static void MoveOfficialFirst(List<DownloadCandidate> candidates)
+    {
+        var index = candidates.FindIndex(c => c.SourceName.Contains("官方", StringComparison.Ordinal));
+        if (index <= 0)
+        {
+            return;
+        }
+
+        var official = candidates[index];
+        candidates.RemoveAt(index);
+        candidates.Insert(0, official);
+    }
+
     private async Task<IReadOnlyList<LoaderVersionOption>> ListNeoForgeAsync(string gameVersion, CancellationToken ct)
     {
-        var json = await _downloader
-            .RequestStringAsync(NeoForgeMetadataUrl, HttpMethod.Get, null, null, null, ct)
-            .ConfigureAwait(false);
+        var candidates = _resolver.Resolve(NeoForgeMetadataUrl, DownloadUrlKind.ModLoaderMetadata);
+        var json = await GetMetadataAsync(candidates, ct).ConfigureAwait(false);
 
-        var payload = JsonUtil.Deserialize<MavenVersionsPayload>(json) ?? new MavenVersionsPayload();
+        var versions = ParseNeoForgeVersions(json);
+        var latest = versions.LastOrDefault();
         var prefix = McVersionUtil.GetBaseVersion(gameVersion) switch
         {
             var v when v.StartsWith("1.", StringComparison.Ordinal) => v[2..] + ".",
             var v => v + ".",
         };
 
-        var result = payload.Versions
+        var result = versions
             .Where(v => v.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-            .Select(v => new LoaderVersionOption { Version = v, IsLatest = v == payload.Versions.LastOrDefault() })
+            .Select(v => new LoaderVersionOption { Version = v, IsLatest = v == latest })
             .ToList();
 
         result.Reverse();
+        return result;
+    }
+
+    /// <summary>
+    /// 解析 NeoForge 版本列表。官方接口返回 <c>{ "versions": [...] }</c>，
+    /// 镜像 details 接口返回 <c>{ "files": [{ "name": "...", "type": "DIRECTORY" }] }</c>。
+    /// </summary>
+    private static List<string> ParseNeoForgeVersions(string json)
+    {
+        using var document = JsonDocument.Parse(json);
+        var root = document.RootElement;
+        var result = new List<string>();
+
+        if (root.ValueKind == JsonValueKind.Object
+            && root.TryGetProperty("versions", out var versions)
+            && versions.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in versions.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.String)
+                {
+                    continue;
+                }
+
+                var version = item.GetString();
+                if (!string.IsNullOrWhiteSpace(version))
+                {
+                    result.Add(version);
+                }
+            }
+        }
+        else if (root.ValueKind == JsonValueKind.Object
+                 && root.TryGetProperty("files", out var files)
+                 && files.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in files.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                if (item.TryGetProperty("type", out var type)
+                    && (type.ValueKind != JsonValueKind.String
+                        || !string.Equals(type.GetString(), "DIRECTORY", StringComparison.OrdinalIgnoreCase)))
+                {
+                    continue;
+                }
+
+                if (item.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+                {
+                    var version = name.GetString();
+                    if (!string.IsNullOrWhiteSpace(version))
+                    {
+                        result.Add(version);
+                    }
+                }
+            }
+        }
+
         return result;
     }
 
@@ -353,9 +572,8 @@ public sealed partial class ModLoaderService
         var url = $"{metaBase}/versions/loader/{Uri.EscapeDataString(gameVersion)}/"
                   + $"{Uri.EscapeDataString(loaderVersion)}/profile/json";
 
-        var json = await _downloader
-            .RequestStringAsync(url, HttpMethod.Get, null, null, null, ct)
-            .ConfigureAwait(false);
+        var candidates = _resolver.Resolve(url, DownloadUrlKind.ModLoaderMetadata);
+        var json = await GetMetadataAsync(candidates, ct).ConfigureAwait(false);
 
         var version = JsonUtil.Deserialize<GameVersionJson>(json)
                       ?? throw new InvalidDataException($"{DisplayName(kind)} 没有返回可用的版本 JSON");
@@ -543,15 +761,9 @@ public sealed partial class ModLoaderService
         public string? Version { get; set; }
     }
 
-    private sealed class ForgePromotions
+    private sealed class ForgeVersionEntry
     {
-        [System.Text.Json.Serialization.JsonPropertyName("promos")]
-        public Dictionary<string, string>? Promos { get; set; }
-    }
-
-    private sealed class MavenVersionsPayload
-    {
-        [System.Text.Json.Serialization.JsonPropertyName("versions")]
-        public List<string> Versions { get; set; } = new();
+        [System.Text.Json.Serialization.JsonPropertyName("version")]
+        public string? Version { get; set; }
     }
 }

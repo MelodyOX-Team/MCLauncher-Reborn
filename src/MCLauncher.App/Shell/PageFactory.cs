@@ -100,6 +100,14 @@ public sealed class PageFactory
         home.SelectAndLaunchServer(versionId, host, port);
     }
 
+    /// <summary>首页右下角「安装新实例」：切到实例列表并打开安装新游戏弹窗。</summary>
+    public void OpenInstallNewGame()
+    {
+        var versions = Versions;
+        Navigate(VersionsPageId);
+        versions.OpenInstallCommand.Execute(null);
+    }
+
     /// <summary>实例列表的「实例管理」：打开模组 / 资源包 / 世界等管理页。</summary>
     public void OpenInstanceManage(string versionId)
     {
@@ -108,7 +116,8 @@ public sealed class PageFactory
     }
 
     private HomeViewModel Home =>
-        _home ??= new HomeViewModel(_stack, OpenInstanceSettings, () => Navigate(AccountsPageId));
+        _home ??= new HomeViewModel(
+            _stack, OpenInstanceSettings, () => Navigate(AccountsPageId), OpenInstallNewGame);
 
     private SettingsViewModel Settings => _settings ??= new SettingsViewModel(_stack);
 

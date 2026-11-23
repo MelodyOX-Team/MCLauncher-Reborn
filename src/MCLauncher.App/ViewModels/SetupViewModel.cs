@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Input;
+using MCLauncher.App.Services;
 using MCLauncher.App.ViewModels.Mvvm;
 using MCLauncher.Core.Models;
 using MCLauncher.Core.Services;
@@ -26,8 +27,15 @@ public sealed class SetupViewModel : ViewModelBase
     private const int MemoryFloorMb = 512;
     private const int MemoryCapMb = 16384;
 
+    /// <summary>Azul 接口不可用时的内置版本（带游戏版本说明的在前）。</summary>
+    private static readonly int[] DefaultJavaMajors = { 25, 21, 17, 8 };
+
+    /// <summary>Azul 的 LTS 主版本（用于下拉框标注）。</summary>
+    private static readonly int[] LtsMajors = { 8, 11, 17, 21, 25, 29 };
+
     private readonly LauncherStack _stack;
     private readonly RelayCommand _confirmCommand;
+    private readonly RelayCommand _downloadJavaCommand;
 
     private bool _isOpen;
     private string _maxMemoryText;
@@ -38,6 +46,13 @@ public sealed class SetupViewModel : ViewModelBase
     private string _accountTypeText = string.Empty;
     private bool _hasAccount;
     private long _totalMemoryMb;
+
+    private bool _isJavaMissing;
+    private bool _isJavaDownloading;
+    private bool _setJavaEnvironment = true;
+    private double _javaDownloadProgress;
+    private string _javaDownloadStatus = string.Empty;
+    private JavaDownloadOption? _selectedJavaOption;
 
     private AccountsViewModel? _accounts;
     private bool _isAddAccountOpen;
@@ -58,6 +73,17 @@ public sealed class SetupViewModel : ViewModelBase
         _maxMemoryText = RecommendedMaxMemoryMb(_totalMemoryMb).ToString();
         _javaPath = stack.Config.Settings.JavaPath ?? string.Empty;
 
+        foreach (var major in DefaultJavaMajors)
+        {
+            JavaVersionOptions.Add(CreateJavaOption(major));
+        }
+
+        _selectedJavaOption = JavaVersionOptions.FirstOrDefault(option => option.Major == 21)
+                              ?? JavaVersionOptions.FirstOrDefault();
+
+        _downloadJavaCommand = new RelayCommand(() => _ = DownloadJavaAsync(), () => !IsJavaDownloading);
+        DownloadJavaCommand = _downloadJavaCommand;
+
         AddAccountCommand = new RelayCommand(OpenAddAccount);
         SelectOfflineCommand = new RelayCommand(() => SelectKind(SetupAccountKind.Offline));
         SelectMicrosoftCommand = new RelayCommand(() => SelectKind(SetupAccountKind.Microsoft));
@@ -75,6 +101,7 @@ public sealed class SetupViewModel : ViewModelBase
             IsOpen = true;
             RefreshAccount();
             _ = DetectJavaAsync();
+            _ = LoadJavaVersionsAsync();
         }
     }
 
@@ -162,6 +189,56 @@ public sealed class SetupViewModel : ViewModelBase
     {
         get => _javaStatusText;
         private set => SetProperty(ref _javaStatusText, value);
+    }
+
+    /// <summary>没有可用的 64 位 Java 时，展示「选择版本并下载」区域。</summary>
+    public bool IsJavaMissing
+    {
+        get => _isJavaMissing;
+        private set => SetProperty(ref _isJavaMissing, value);
+    }
+
+    /// <summary>可下载的 Java 版本，打开设置时从 Azul API 动态填充。</summary>
+    public ObservableCollection<JavaDownloadOption> JavaVersionOptions { get; } = new();
+
+    public JavaDownloadOption? SelectedJavaOption
+    {
+        get => _selectedJavaOption;
+        set => SetProperty(ref _selectedJavaOption, value);
+    }
+
+    public bool IsJavaDownloading
+    {
+        get => _isJavaDownloading;
+        private set
+        {
+            if (SetProperty(ref _isJavaDownloading, value))
+            {
+                OnPropertyChanged(nameof(IsJavaDownloadIdle));
+            }
+        }
+    }
+
+    public bool IsJavaDownloadIdle => !IsJavaDownloading;
+
+    /// <summary>Java 下载进度，0–100。</summary>
+    public double JavaDownloadProgress
+    {
+        get => _javaDownloadProgress;
+        private set => SetProperty(ref _javaDownloadProgress, value);
+    }
+
+    public string JavaDownloadStatus
+    {
+        get => _javaDownloadStatus;
+        private set => SetProperty(ref _javaDownloadStatus, value);
+    }
+
+    /// <summary>下载完成后是否把 Java 写入用户环境变量（JAVA_HOME / PATH）。</summary>
+    public bool SetJavaEnvironment
+    {
+        get => _setJavaEnvironment;
+        set => SetProperty(ref _setJavaEnvironment, value);
     }
 
     public string ErrorText
@@ -289,6 +366,9 @@ public sealed class SetupViewModel : ViewModelBase
     public ICommand CancelAddAccountCommand { get; }
 
     public ICommand BrowseJavaCommand { get; }
+
+    /// <summary>按选择的版本下载并安装 Zulu JDK。</summary>
+    public ICommand DownloadJavaCommand { get; }
 
     public ICommand ConfirmCommand { get; }
 
@@ -514,11 +594,14 @@ public sealed class SetupViewModel : ViewModelBase
             JavaStatusText = string.IsNullOrWhiteSpace(JavaPath)
                 ? "没有探测到可用的 64 位 Java，请点击「浏览」手动指定。"
                 : $"已自动选择：{JavaPath}";
+
+            IsJavaMissing = !File.Exists(JavaPath.Trim());
         }
         catch (Exception ex)
         {
             _stack.Log.Error("初始化设置探测 Java 失败", ex);
             JavaStatusText = "探测失败，请点击「浏览」手动指定 java.exe。";
+            IsJavaMissing = true;
         }
     }
 
@@ -535,8 +618,157 @@ public sealed class SetupViewModel : ViewModelBase
         {
             JavaPath = dialog.FileName;
             JavaStatusText = "已手动指定 Java 路径。";
+            IsJavaMissing = false;
         }
     }
+
+    /// <summary>
+    /// 从 Azul Metadata API 拉取当前可用的 Zulu 主版本并替换内置列表；
+    /// 请求失败时保留内置的 8 / 17 / 21 / 25。
+    /// </summary>
+    private async Task LoadJavaVersionsAsync()
+    {
+        try
+        {
+            var majors = await _stack.ZuluJava.ListAvailableMajorsAsync();
+
+            if (majors.Count == 0)
+            {
+                return;
+            }
+
+            var selectedMajor = SelectedJavaOption?.Major ?? 21;
+
+            // 带游戏版本说明的常用版本置顶，其余按主版本降序排在后面。
+            var options = majors
+                .Select(CreateJavaOption)
+                .OrderByDescending(option => option.HasGameHint)
+                .ThenByDescending(option => option.Major)
+                .ToList();
+
+            JavaVersionOptions.Clear();
+            foreach (var option in options)
+            {
+                JavaVersionOptions.Add(option);
+            }
+
+            SelectedJavaOption = JavaVersionOptions.FirstOrDefault(option => option.Major == selectedMajor)
+                                 ?? JavaVersionOptions.FirstOrDefault(option => option.Major == 21)
+                                 ?? JavaVersionOptions.FirstOrDefault();
+        }
+        catch (Exception ex)
+        {
+            _stack.Log.Info($"获取 Zulu 主版本列表失败，使用内置选项：{ex.Message}");
+        }
+    }
+
+    private static JavaDownloadOption CreateJavaOption(int major)
+    {
+        var isLts = Array.IndexOf(LtsMajors, major) >= 0;
+        var hint = major switch
+        {
+            8 => "LTS · 适合 1.16.5 及更早版本",
+            11 => "LTS",
+            17 => "LTS · 适合 1.17 – 1.20.4",
+            21 => "LTS · 适合 1.20.5 – 1.21.x（推荐）",
+            25 => "LTS · 适合最新快照 / 未来版本",
+            _ => isLts ? "LTS" : "非 LTS",
+        };
+
+        return new JavaDownloadOption { Major = major, Hint = hint };
+    }
+
+    /// <summary>按用户选择的版本下载 Zulu JDK，安装完成后自动填入 Java 路径。</summary>
+    private async Task DownloadJavaAsync()
+    {
+        var option = SelectedJavaOption;
+        if (option is null || IsJavaDownloading)
+        {
+            return;
+        }
+
+        ErrorText = string.Empty;
+        IsJavaDownloading = true;
+        JavaDownloadProgress = 0;
+        JavaDownloadStatus = $"正在准备 Java {option.Major}…";
+
+        try
+        {
+            var progress = new Progress<JavaRuntimeProgress>(p =>
+            {
+                JavaDownloadProgress = Math.Round(Math.Clamp(p.Fraction, 0d, 1d) * 100, 1);
+
+                var speed = p.BytesPerSecond > 0 && p.Fraction < 1
+                    ? $" · {FormatSpeed(p.BytesPerSecond)}/s"
+                    : string.Empty;
+
+                JavaDownloadStatus = p.Fraction >= 1
+                    ? p.Stage
+                    : $"{p.Stage} · {JavaDownloadProgress:0}%{speed}";
+            });
+
+            var java = await _stack.ZuluJava.EnsureAsync(option.Major, progress);
+
+            JavaPath = java.Path;
+            JavaDownloadProgress = 100;
+            JavaDownloadStatus = $"Java {java.MajorVersion} 已就绪";
+            IsJavaMissing = false;
+            JavaStatusText = $"已安装 Java {java.MajorVersion}：{java.Path}";
+
+            if (SetJavaEnvironment)
+            {
+                ApplyJavaEnvironment(java.Path);
+            }
+
+            _stack.Log.Info($"初始化设置已安装 Java {java.MajorVersion}：{java.Path}");
+            NotifyCanConfirm();
+        }
+        catch (Exception ex)
+        {
+            _stack.Log.Error($"下载安装 Java {option.Major} 失败", ex);
+            ErrorText = $"下载 Java {option.Major} 失败：{ex.Message}";
+            JavaDownloadStatus = "下载失败，可以重试，或手动指定已安装的 java.exe。";
+        }
+        finally
+        {
+            IsJavaDownloading = false;
+        }
+    }
+
+    /// <summary>把新安装的 Java 写入用户环境变量；失败只提示，不影响安装结果。</summary>
+    private void ApplyJavaEnvironment(string javaPath)
+    {
+        try
+        {
+            var result = JavaEnvironmentService.Register(javaPath);
+            var details = new List<string>();
+
+            if (result.JavaHomeWritten)
+            {
+                details.Add("JAVA_HOME 已写入用户环境变量");
+            }
+
+            if (result.PathUpdated)
+            {
+                details.Add("PATH 已追加 Java 目录");
+            }
+
+            JavaStatusText += "；" + (details.Count > 0
+                ? string.Join("；", details)
+                : "用户环境变量已包含该 Java，无需修改");
+
+            _stack.Log.Info($"Java 环境变量已更新：{result.JavaHome}");
+        }
+        catch (Exception ex)
+        {
+            _stack.Log.Warn("写入 Java 用户环境变量失败", ex);
+            JavaStatusText += "；写入环境变量失败，可手动添加 JAVA_HOME 与 PATH";
+        }
+    }
+
+    private static string FormatSpeed(double bytesPerSecond) => bytesPerSecond >= 1024 * 1024
+        ? $"{bytesPerSecond / 1024d / 1024d:0.#} MB"
+        : $"{bytesPerSecond / 1024d:0.#} KB";
 
     // ---------------------------------------------------------------- 完成设置
 
@@ -621,4 +853,18 @@ public sealed class SetupViewModel : ViewModelBase
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+}
+
+/// <summary>初始化设置里可下载的 Java 版本。</summary>
+public sealed class JavaDownloadOption
+{
+    public required int Major { get; init; }
+
+    public required string Hint { get; init; }
+
+    /// <summary>带游戏版本说明的常用版本，在下拉框中置顶显示。</summary>
+    public bool HasGameHint => Major is 8 or 17 or 21 or 25;
+
+    /// <summary>下拉框显示文本。</summary>
+    public string Display => $"Java {Major} · {Hint}";
 }

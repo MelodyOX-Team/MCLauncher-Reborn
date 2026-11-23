@@ -28,6 +28,13 @@ public sealed class DownloadSourceResolver
     /// <summary>内置默认镜像根（BMCLAPI）。</summary>
     public const string DefaultMirrorBase = "https://bmclapi2.bangbang93.com";
 
+    /// <summary>默认额外参与竞速的 BMCLAPI 兼容镜像。</summary>
+    public static readonly IReadOnlyList<string> DefaultAdditionalMirrorBases = new[]
+    {
+        "https://mirror.minguncle.cn",
+        "https://mirror.hkmc.online",
+    };
+
     /// <summary>国内 Mod 平台镜像根。</summary>
     public const string DefaultModMirrorBase = "https://mod.mcimirror.top";
 
@@ -52,6 +59,9 @@ public sealed class DownloadSourceResolver
 
     /// <summary>镜像根地址，可在设置中覆盖。</summary>
     public string MirrorBase { get; set; } = DefaultMirrorBase;
+
+    /// <summary>额外镜像根（BMCLAPI 兼容路径），默认启用 MCMirror 与 MC光速。</summary>
+    public IReadOnlyList<string> AdditionalMirrorBases { get; set; } = DefaultAdditionalMirrorBases;
 
     /// <summary>Mod 平台镜像根地址。</summary>
     public string ModMirrorBase { get; set; } = DefaultModMirrorBase;
@@ -128,7 +138,9 @@ public sealed class DownloadSourceResolver
     /// </summary>
     private bool ShouldPreferMirror(DownloadUrlKind kind)
     {
-        var preference = kind == DownloadUrlKind.Metadata ? VersionListSource : FileSource;
+        var preference = kind is DownloadUrlKind.Metadata or DownloadUrlKind.ModLoaderMetadata
+            ? VersionListSource
+            : FileSource;
         return preference switch
         {
             DownloadSourcePreference.Official => false,
@@ -136,6 +148,12 @@ public sealed class DownloadSourceResolver
             _ => MirrorReachable != false,
         };
     }
+
+    /// <summary>版本列表类元数据是否应优先镜像。</summary>
+    public bool PreferMirrorForVersionList => ShouldPreferMirror(DownloadUrlKind.ModLoaderMetadata);
+
+    /// <summary>当前参与映射的镜像根地址，主镜像在前。</summary>
+    public IReadOnlyList<(string Url, string Name)> GetMirrorBases() => EnumerateMirrorBases();
 
     private List<DownloadCandidate> BuildMirrors(string url, DownloadUrlKind kind, string? versionId)
     {
@@ -151,38 +169,160 @@ public sealed class DownloadSourceResolver
             return mirrors;
         }
 
-        var path = uri.AbsolutePath;
-
-        switch (kind)
+        if (kind == DownloadUrlKind.ModLoaderMetadata)
         {
-            case DownloadUrlKind.Asset:
-                mirrors.Add(new DownloadCandidate(MirrorBase + "/assets" + path, "BMCLAPI"));
-                break;
+            AddModLoaderMetadataMirrors(mirrors, uri);
+            return mirrors;
+        }
 
-            case DownloadUrlKind.Library:
-            case DownloadUrlKind.ModLoaderLibrary:
-            case DownloadUrlKind.ModLoaderInstaller:
-                mirrors.Add(new DownloadCandidate(MirrorBase + "/maven" + path, "BMCLAPI(Maven)"));
-                mirrors.Add(new DownloadCandidate(MirrorBase + "/libraries" + path, "BMCLAPI(Libraries)"));
-                break;
+        var path = uri.AbsolutePath;
+        var bases = EnumerateMirrorBases();
 
-            case DownloadUrlKind.Client:
-                if (!string.IsNullOrWhiteSpace(versionId))
-                {
-                    var safeId = Uri.EscapeDataString(versionId);
-                    mirrors.Add(new DownloadCandidate($"{MirrorBase}/versions/{safeId}/{safeId}.jar", "BMCLAPI(版本)"));
-                }
+        for (var index = 0; index < bases.Count; index++)
+        {
+            var (baseUrl, name) = bases[index];
+            var isPrimary = index == 0;
 
-                mirrors.Add(new DownloadCandidate(MirrorBase + path, "BMCLAPI"));
-                break;
+            switch (kind)
+            {
+                case DownloadUrlKind.Asset:
+                    AddMirror(mirrors, baseUrl + "/assets" + path, name);
+                    break;
 
-            case DownloadUrlKind.Metadata:
-            case DownloadUrlKind.AssetIndex:
-                mirrors.Add(new DownloadCandidate(MirrorBase + path, "BMCLAPI"));
-                break;
+                case DownloadUrlKind.Library:
+                case DownloadUrlKind.ModLoaderLibrary:
+                case DownloadUrlKind.ModLoaderInstaller:
+                    AddMirror(mirrors, baseUrl + "/maven" + path, name + "(Maven)");
+
+                    // 只有主镜像（BMCLAPI / 用户自定义）提供 /libraries 别名。
+                    if (isPrimary)
+                    {
+                        AddMirror(mirrors, baseUrl + "/libraries" + path, name + "(Libraries)");
+                    }
+
+                    break;
+
+                case DownloadUrlKind.Client:
+                    // 只有主镜像提供 versions/<id>/<id>.jar 快捷路径；第三方镜像走原始路径。
+                    if (isPrimary && !string.IsNullOrWhiteSpace(versionId))
+                    {
+                        var safeId = Uri.EscapeDataString(versionId);
+                        AddMirror(mirrors, $"{baseUrl}/versions/{safeId}/{safeId}.jar", name + "(版本)");
+                    }
+
+                    AddMirror(mirrors, baseUrl + path, name);
+                    break;
+
+                case DownloadUrlKind.Metadata:
+                case DownloadUrlKind.AssetIndex:
+                    AddMirror(mirrors, baseUrl + path, name);
+                    break;
+            }
         }
 
         return mirrors;
+    }
+
+    /// <summary>主镜像在前，额外镜像按配置顺序追加，并按 URL 去重。</summary>
+    private List<(string Url, string Name)> EnumerateMirrorBases()
+    {
+        var bases = new List<(string Url, string Name)>();
+        AddBase(bases, MirrorBase, "BMCLAPI");
+
+        foreach (var extra in AdditionalMirrorBases)
+        {
+            AddBase(bases, extra, null);
+        }
+
+        return bases;
+    }
+
+    private static void AddBase(List<(string Url, string Name)> bases, string? url, string? name)
+    {
+        if (string.IsNullOrWhiteSpace(url))
+        {
+            return;
+        }
+
+        var normalized = url.Trim().TrimEnd('/');
+        if (normalized.Length == 0
+            || bases.Any(item => string.Equals(item.Url, normalized, StringComparison.OrdinalIgnoreCase)))
+        {
+            return;
+        }
+
+        bases.Add((normalized, name ?? MirrorDisplayName(normalized)));
+    }
+
+    private static void AddMirror(List<DownloadCandidate> mirrors, string url, string name)
+    {
+        if (!mirrors.Any(item => string.Equals(item.Url, url, StringComparison.OrdinalIgnoreCase)))
+        {
+            mirrors.Add(new DownloadCandidate(url, name));
+        }
+    }
+
+    /// <summary>给额外镜像取一个短名字，日志和候选来源里能区分。</summary>
+    private static string MirrorDisplayName(string baseUrl)
+    {
+        var host = Uri.TryCreate(baseUrl, UriKind.Absolute, out var uri) ? uri.Host : baseUrl;
+
+        if (host.Contains("minguncle", StringComparison.OrdinalIgnoreCase))
+        {
+            return "MCMirror";
+        }
+
+        if (host.Contains("hkmc", StringComparison.OrdinalIgnoreCase))
+        {
+            return "MC光速";
+        }
+
+        return host;
+    }
+
+    private void AddModLoaderMetadataMirrors(List<DownloadCandidate> mirrors, Uri uri)
+    {
+        var host = uri.Host;
+        var path = uri.AbsolutePath;
+
+        foreach (var (baseUrl, name) in EnumerateMirrorBases())
+        {
+            if (host.Equals("meta.fabricmc.net", StringComparison.OrdinalIgnoreCase))
+            {
+                AddMirror(mirrors, baseUrl + "/fabric-meta" + path, name + "(Fabric Meta)");
+                continue;
+            }
+
+            if (host.Equals("meta.quiltmc.org", StringComparison.OrdinalIgnoreCase))
+            {
+                // BMCLAPI 只镜像 Quilt 的版本列表；profile/json 仍必须回官方。
+                if (path.Equals("/v3/versions/loader", StringComparison.OrdinalIgnoreCase)
+                    || path.Equals("/v3/versions/game", StringComparison.OrdinalIgnoreCase))
+                {
+                    AddMirror(mirrors, baseUrl + "/quilt-meta" + path, name + "(Quilt Meta)");
+                }
+
+                continue;
+            }
+
+            if (host.Equals("files.minecraftforge.net", StringComparison.OrdinalIgnoreCase)
+                && path.EndsWith("/promotions_slim.json", StringComparison.OrdinalIgnoreCase))
+            {
+                AddMirror(mirrors, baseUrl + "/forge/promos", name + "(Forge Promos)");
+                continue;
+            }
+
+            if (host.Equals("maven.neoforged.net", StringComparison.OrdinalIgnoreCase)
+                && path.StartsWith("/api/maven/versions/releases/", StringComparison.OrdinalIgnoreCase))
+            {
+                // 镜像的 NeoForge 元数据走 details 接口，返回 files 数组而不是 versions 数组。
+                AddMirror(
+                    mirrors,
+                    baseUrl + "/neoforge/meta/api/maven/details/releases/" +
+                    path["/api/maven/versions/releases/".Length..],
+                    name + "(NeoForge Meta)");
+            }
+        }
     }
 
     private void AddModPlatformMirrors(List<DownloadCandidate> mirrors, string url)

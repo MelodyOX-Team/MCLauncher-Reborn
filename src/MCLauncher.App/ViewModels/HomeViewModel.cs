@@ -23,6 +23,7 @@ public sealed class HomeViewModel : ViewModelBase
     private const int MaxOutputChars = 60_000;
 
     private readonly LauncherStack _stack;
+    private readonly Action _openInstallNewInstance;
     private readonly AsyncRelayCommand _launchCommand;
     private readonly AsyncRelayCommand _completeCommand;
     private readonly AsyncRelayCommand _upgradeCommand;
@@ -34,6 +35,7 @@ public sealed class HomeViewModel : ViewModelBase
     private readonly DownloadFileRows _updateRows = new();
 
     private InstalledVersionInfo? _selectedVersion;
+    private bool _hasNoInstances;
     private string _statusText = "就绪";
     private string _launchOutput = string.Empty;
     private bool _hasLaunchOutput;
@@ -74,9 +76,14 @@ public sealed class HomeViewModel : ViewModelBase
     private (string Host, int Port)? _pendingServer;
     private bool _windowHiddenByLaunch;
 
-    public HomeViewModel(LauncherStack stack, Action<string?> openInstanceSettings, Action openAccounts)
+    public HomeViewModel(
+        LauncherStack stack,
+        Action<string?> openInstanceSettings,
+        Action openAccounts,
+        Action openInstallNewInstance)
     {
         _stack = stack;
+        _openInstallNewInstance = openInstallNewInstance;
         _avatars = new AvatarService(stack.Config.ConfigDirectory, stack.Log);
 
         OpenFolderCommand = new RelayCommand(OpenGameFolder);
@@ -85,7 +92,7 @@ public sealed class HomeViewModel : ViewModelBase
         RefreshCommand = new RelayCommand(Refresh);
         CloseUpdateDialogCommand = new RelayCommand(CloseUpdateDialog);
 
-        _launchCommand = new AsyncRelayCommand(LaunchAsync, () => !IsBusy && SelectedVersion is not null);
+        _launchCommand = new AsyncRelayCommand(LaunchAsync, () => !IsBusy);
         _completeCommand = new AsyncRelayCommand(OpenUpdateDialogAsync, () => !IsBusy && SelectedVersion is not null);
         _upgradeCommand = new AsyncRelayCommand(UpgradeAsync, () => CanUpgrade);
         LaunchCommand = _launchCommand;
@@ -142,6 +149,22 @@ public sealed class HomeViewModel : ViewModelBase
         get => _statusText;
         private set => SetProperty(ref _statusText, value);
     }
+
+    /// <summary>本地没有任何实例：下拉框显示占位，右下角主按钮改为安装入口。</summary>
+    public bool HasNoInstances
+    {
+        get => _hasNoInstances;
+        private set
+        {
+            if (SetProperty(ref _hasNoInstances, value))
+            {
+                OnPropertyChanged(nameof(PrimaryActionText));
+            }
+        }
+    }
+
+    /// <summary>右下角主按钮文字：有实例时「启动游戏」，无实例时「安装新实例」。</summary>
+    public string PrimaryActionText => HasNoInstances ? "安装新实例" : "启动游戏";
 
     /// <summary>启动面板里的输出文本，逐行追加，不覆盖旧内容。</summary>
     public string LaunchOutput
@@ -421,6 +444,8 @@ public sealed class HomeViewModel : ViewModelBase
 
         SelectedVersion = Versions.FirstOrDefault(v => v.Id == previous) ?? Versions.FirstOrDefault();
 
+        HasNoInstances = Versions.Count == 0;
+
         var account = _stack.Accounts.Selected;
         AccountName = account?.Name ?? "未选择账号";
         AccountTypeText = account is null
@@ -432,7 +457,7 @@ public sealed class HomeViewModel : ViewModelBase
 
         if (Versions.Count == 0)
         {
-            StatusText = "本地还没有实例，请到「实例列表」页安装";
+            StatusText = "还没有实例，点右下角「安装新实例」开始。";
         }
     }
 
@@ -769,6 +794,8 @@ public sealed class HomeViewModel : ViewModelBase
         var version = SelectedVersion;
         if (version is null)
         {
+            // 没有实例时主按钮是「安装新实例」：切到实例列表并打开安装新游戏窗口。
+            _openInstallNewInstance();
             return;
         }
 

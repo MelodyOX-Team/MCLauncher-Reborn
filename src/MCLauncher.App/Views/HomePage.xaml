@@ -98,6 +98,12 @@
                              VerticalScrollBarVisibility="Auto"
                              HorizontalScrollBarVisibility="Auto"
                              TextChanged="OnLaunchOutputChanged"/>
+                    <!-- 健康游戏忠告：游戏启动期间常驻显示 -->
+                    <TextBlock Margin="2,6,2,0" FontSize="11" Foreground="#B3FFFFFF"
+                               TextWrapping="Wrap" LineHeight="15">
+                        <Run Text="《健康游戏忠告》" FontWeight="SemiBold" Foreground="#FFFFFF"/>
+                        <Run Text="抵制不良游戏，拒绝盗版游戏。注意自我保护，谨防受骗上当。适度游戏益脑，沉迷游戏伤身。合理安排时间，享受健康生活。"/>
+                    </TextBlock>
                 </StackPanel>
             </Border>
             <ProgressBar Margin="0,8,0,0" Height="6" Minimum="0" Maximum="1"
@@ -262,7 +268,7 @@
             <Button Grid.Row="0" Grid.RowSpan="3" Grid.Column="0"
                     Style="{StaticResource SkinButton}"
                     Command="{Binding LaunchCommand}"
-                    Content="启动游戏"
+                    Content="{Binding PrimaryActionText}"
                     FontSize="20" FontWeight="Bold"/>
 
             <Button Grid.Row="0" Grid.Column="2"
@@ -280,13 +286,22 @@
 
             <StackPanel Grid.Row="4" Grid.Column="0" Grid.ColumnSpan="3"
                         Orientation="Horizontal" HorizontalAlignment="Left">
-                <ComboBox Width="180" Height="30"
-                          VerticalAlignment="Center"
-                          FontSize="14" Foreground="#1A1A1A"
-                          ItemsSource="{Binding Versions}"
-                          SelectedItem="{Binding SelectedVersion, Mode=TwoWay}"
-                          DisplayMemberPath="Display"
-                          ToolTip="选择要启动的版本"/>
+                <Grid Width="180" Height="30" VerticalAlignment="Center">
+                    <ComboBox Height="30"
+                              VerticalAlignment="Center"
+                              FontSize="14" Foreground="#1A1A1A"
+                              ItemsSource="{Binding Versions}"
+                              SelectedItem="{Binding SelectedVersion, Mode=TwoWay}"
+                              DisplayMemberPath="Display"
+                              ToolTip="选择要启动的版本"/>
+                    <TextBlock Text="无可用实例"
+                               Margin="9,0,0,0"
+                               VerticalAlignment="Center"
+                               FontSize="13"
+                               Foreground="#8A8A8A"
+                               IsHitTestVisible="False"
+                               Visibility="{Binding HasNoInstances, Converter={StaticResource BoolToVis}}"/>
+                </Grid>
                 <Button Style="{StaticResource CreditLink}"
                         Command="{Binding OpenFolderCommand}"
                         Content="打开目录"

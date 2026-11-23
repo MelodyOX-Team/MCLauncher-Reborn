@@ -13,7 +13,8 @@
 
   <!-- exe 属性面板里「详细信息」页签展示的元数据 -->
   <PropertyGroup>
-    <Version>6.0.0</Version>
+    <!-- 版本规则：每次推送递增最后一位（6.0.0.1 → 6.0.0.9999） -->
+    <Version>6.0.0.1</Version>
     <!-- 由 Version 派生，避免只改 Version 时程序集版本仍是旧值、更新检查反复提示 -->
     <AssemblyVersion>$(Version)</AssemblyVersion>
     <FileVersion>$(Version)</FileVersion>

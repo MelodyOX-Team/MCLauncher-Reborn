@@ -446,6 +446,9 @@
                                 <TextBlock Text="安装新游戏" FontSize="16" FontWeight="SemiBold"/>
                                 <TextBlock Text="原版、加载器与实例名可以一次配好；同一时间只能选一个加载器。"
                                            Margin="0,4,0,0" Style="{StaticResource BodyText}"/>
+                                <TextBlock Text="启动器仅提供下载与安装功能；游戏分发由官方源与镜像源提供，与启动器无关。"
+                                           Margin="0,4,0,0" FontSize="11" Foreground="#8A8A8A"
+                                           TextWrapping="Wrap"/>
 
                                 <Grid Margin="0,12,0,0">
                                     <Grid.ColumnDefinitions>

@@ -195,7 +195,7 @@ public sealed class LauncherStack : IDisposable
             downloader, resolver, config.ResolveCurseForgeApiKey(), log);
         var modrinth = new ModrinthService(downloader, resolver, log);
         var instances = new InstanceService(repository, config, manifests, log);
-        var modLoaders = new ModLoaderService(downloader, repository, installer, forgeInstaller, log);
+        var modLoaders = new ModLoaderService(downloader, resolver, repository, installer, forgeInstaller, log);
         var resourceDownloads = new ResourceDownloadService(downloader, resolver, log);
         var resourceUpdates = new ResourceUpdateService(curseForge, modrinth, log);
         var gameUpdates = new GameUpdateService(

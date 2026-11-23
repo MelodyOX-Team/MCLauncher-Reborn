@@ -283,6 +283,38 @@ public sealed class ZuluJavaService
     }
 
     /// <summary>
+    /// 列出 Azul 当前提供的 Windows 64 位 Zulu JDK 主版本（GA），按主版本降序。
+    /// 用于初始化设置里动态填充版本下拉框；失败时由调用方回退到内置选项。
+    /// </summary>
+    public async Task<IReadOnlyList<int>> ListAvailableMajorsAsync(CancellationToken ct = default)
+    {
+        var arch = RuntimeInformation.OSArchitecture switch
+        {
+            Architecture.X64 => "x64",
+            Architecture.Arm64 => "arm",
+            _ => throw new PlatformNotSupportedException("自动下载 Java 仅支持 Windows x64 / arm64"),
+        };
+
+        var url = $"{ApiBase}/zulu/packages/?os=windows&arch={arch}"
+                  + "&java_package_type=jdk&javafx_bundled=false&archive_type=zip"
+                  + "&release_status=ga&availability_types=CA&latest=true&page=1&page_size=200";
+
+        var packages = await GetJsonAsync<List<ZuluPackage>>(url, ct).ConfigureAwait(false);
+
+        return (packages ?? new List<ZuluPackage>())
+            .Where(p => !string.IsNullOrWhiteSpace(p.DownloadUrl))
+            .Where(p => p.DownloadUrl.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            .Where(p => p.Name.Contains("-jdk", StringComparison.OrdinalIgnoreCase))
+            .Where(p => !p.Name.Contains("-crac", StringComparison.OrdinalIgnoreCase))
+            .Where(p => !p.Name.Contains("-fx", StringComparison.OrdinalIgnoreCase))
+            .Select(p => p.JavaVersion.ElementAtOrDefault(0))
+            .Where(major => major > 0)
+            .Distinct()
+            .OrderByDescending(major => major)
+            .ToList();
+    }
+
+    /// <summary>
     /// 查询 Azul Metadata API，返回指定主版本最新的 Windows 64 位 Zulu JDK（zip）。
     /// 只使用 Community Availability 构建；不访问需要订阅令牌的 SA 构建。
     /// </summary>
@@ -308,7 +340,7 @@ public sealed class ZuluJavaService
         var package = packages?
             .Where(p => !string.IsNullOrWhiteSpace(p.PackageUuid))
             .Where(p => p.DownloadUrl.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-            .Where(p => p.Name.Contains("-ca-jdk", StringComparison.OrdinalIgnoreCase))
+            .Where(p => p.Name.Contains("-jdk", StringComparison.OrdinalIgnoreCase))
             .Where(p => !p.Name.Contains("-crac", StringComparison.OrdinalIgnoreCase))
             .Where(p => !p.Name.Contains("-fx", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(p => p.JavaVersion.ElementAtOrDefault(0))

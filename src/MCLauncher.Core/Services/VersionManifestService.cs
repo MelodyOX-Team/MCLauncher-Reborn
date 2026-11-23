@@ -59,7 +59,7 @@ public sealed class VersionManifestService
             try
             {
                 var text = await _downloader
-                    .GetStringAsync(_resolver.Resolve(ManifestUrl, DownloadUrlKind.Metadata), ct)
+                    .GetStringRaceAsync(_resolver.Resolve(ManifestUrl, DownloadUrlKind.Metadata), ct)
                     .ConfigureAwait(false);
 
                 var manifest = JsonUtil.Deserialize<VersionManifest>(text)
@@ -122,7 +122,7 @@ public sealed class VersionManifestService
         }
 
         var text = await _downloader
-            .GetStringAsync(_resolver.Resolve(entry.Url, DownloadUrlKind.Metadata), ct)
+            .GetStringRaceAsync(_resolver.Resolve(entry.Url, DownloadUrlKind.Metadata), ct)
             .ConfigureAwait(false);
 
         // 清单条目自带该 JSON 的 SHA-1；不一致说明内容被镜像或中间人改过，不能拿去安装。

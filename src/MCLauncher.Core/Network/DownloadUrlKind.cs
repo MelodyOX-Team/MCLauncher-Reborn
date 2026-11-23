@@ -28,6 +28,9 @@ public enum DownloadUrlKind
     /// <summary>加载器安装器 jar 或元数据。</summary>
     ModLoaderInstaller,
 
+    /// <summary>加载器版本列表 / profile 等元数据（Fabric/Quilt meta、Forge promos、NeoForge maven API）。</summary>
+    ModLoaderMetadata,
+
     /// <summary>Mod 平台接口（Modrinth / CurseForge）。</summary>
     ModPlatform,
 

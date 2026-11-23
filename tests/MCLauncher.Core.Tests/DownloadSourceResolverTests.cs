@@ -148,22 +148,64 @@ public sealed class DownloadSourceResolverTests
     }
 
     [Fact]
-    public void 自动模式在镜像探测失败时改用官方优先()
+    public void 加载器元数据映射到镜像专用前缀()
     {
-        var resolver = new DownloadSourceResolver(new TestLog());
-        resolver.SetMirrorReachable(false);
+        var resolver = Create();
+
+        var fabric = resolver.Resolve(
+            "https://meta.fabricmc.net/v2/versions/loader",
+            DownloadUrlKind.ModLoaderMetadata);
+        Assert.Contains(
+            "https://bmclapi2.bangbang93.com/fabric-meta/v2/versions/loader",
+            fabric.Select(c => c.Url));
+
+        var quilt = resolver.Resolve(
+            "https://meta.quiltmc.org/v3/versions/loader",
+            DownloadUrlKind.ModLoaderMetadata);
+        Assert.Contains(
+            "https://bmclapi2.bangbang93.com/quilt-meta/v3/versions/loader",
+            quilt.Select(c => c.Url));
+
+        var promos = resolver.Resolve(
+            "https://files.minecraftforge.net/net/minecraftforge/forge/promotions_slim.json",
+            DownloadUrlKind.ModLoaderMetadata);
+        Assert.Contains("https://bmclapi2.bangbang93.com/forge/promos", promos.Select(c => c.Url));
+
+        var neoForge = resolver.Resolve(
+            "https://maven.neoforged.net/api/maven/versions/releases/net/neoforged/neoforge",
+            DownloadUrlKind.ModLoaderMetadata);
+        Assert.Contains(
+            "https://bmclapi2.bangbang93.com/neoforge/meta/api/maven/details/releases/net/neoforged/neoforge",
+            neoForge.Select(c => c.Url));
+    }
+
+    [Fact]
+    public void Quilt的profile不映射镜像()
+    {
+        var resolver = Create();
+        var result = resolver.Resolve(
+            "https://meta.quiltmc.org/v3/versions/loader/1.20.1/0.23.0/profile/json",
+            DownloadUrlKind.ModLoaderMetadata);
+
+        Assert.DoesNotContain(result, c => c.Url.Contains("quilt-meta", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal("官方", result[0].SourceName);
+    }
+
+    [Fact]
+    public void 加载器元数据跟随版本列表源()
+    {
+        var resolver = new DownloadSourceResolver(new TestLog())
+        {
+            VersionListSource = DownloadSourcePreference.Mirror,
+            FileSource = DownloadSourcePreference.Official,
+        };
+
+        Assert.True(resolver.PreferMirrorForVersionList);
 
         var result = resolver.Resolve(
-            "https://libraries.minecraft.net/gson.jar",
-            DownloadUrlKind.Library);
+            "https://meta.fabricmc.net/v2/versions/loader",
+            DownloadUrlKind.ModLoaderMetadata);
 
-        Assert.Equal("官方", result[0].SourceName);
-
-        resolver.SetMirrorReachable(true);
-        result = resolver.Resolve(
-            "https://libraries.minecraft.net/gson.jar",
-            DownloadUrlKind.Library);
-
-        Assert.Equal("BMCLAPI(Maven)", result[0].SourceName);
+        Assert.StartsWith("BMCLAPI", result[0].SourceName);
     }
 }
