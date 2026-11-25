@@ -115,6 +115,14 @@ public sealed class PageFactory
         _pageNavigate?.Invoke(InstanceManagePageId, $"实例管理 · {versionId}");
     }
 
+    /// <summary>把文件拖进窗口且被识别为整合包：切到实例列表并打开安装确认。</summary>
+    public void OpenModpackFromDrop(string archivePath)
+    {
+        var versions = Versions;
+        Navigate(VersionsPageId);
+        _ = versions.OpenDroppedModpackAsync(archivePath);
+    }
+
     private HomeViewModel Home =>
         _home ??= new HomeViewModel(
             _stack, OpenInstanceSettings, () => Navigate(AccountsPageId), OpenInstallNewGame);

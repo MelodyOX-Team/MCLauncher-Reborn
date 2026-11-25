@@ -137,6 +137,85 @@ public sealed class InstallFileItem : ViewModelBase
 }
 
 /// <summary>
+/// 整合包并行安装中的一路任务（原版 / 加载器 / 整合包内容）。
+/// 每一路有自己的状态文字、进度条、速度与并发文件列表，界面按块展示。
+/// </summary>
+public sealed class ModpackPhaseItem : ViewModelBase
+{
+    private readonly DownloadFileRows _rows = new();
+    private bool _isVisible;
+    private double _progress;
+    private string _statusText = string.Empty;
+    private string _speedText = string.Empty;
+
+    public ModpackPhaseItem(string title) => Title = title;
+
+    public string Title { get; }
+
+    public ObservableCollection<InstallFileItem> Files => _rows.Items;
+
+    public bool HasFiles => _rows.Items.Count > 0;
+
+    /// <summary>没有加载器的整合包会隐藏加载器这一路。</summary>
+    public bool IsVisible
+    {
+        get => _isVisible;
+        set => SetProperty(ref _isVisible, value);
+    }
+
+    public double Progress
+    {
+        get => _progress;
+        private set => SetProperty(ref _progress, value);
+    }
+
+    public string StatusText
+    {
+        get => _statusText;
+        private set => SetProperty(ref _statusText, value);
+    }
+
+    public string SpeedText
+    {
+        get => _speedText;
+        private set
+        {
+            if (SetProperty(ref _speedText, value))
+            {
+                OnPropertyChanged(nameof(HasSpeed));
+            }
+        }
+    }
+
+    public bool HasSpeed => _speedText.Length > 0;
+
+    /// <summary>这一路当前平均速度（字节/秒），用于汇总总速度。</summary>
+    public double BytesPerSecond { get; private set; }
+
+    public void Reset()
+    {
+        Progress = 0;
+        StatusText = string.Empty;
+        SpeedText = string.Empty;
+        BytesPerSecond = 0;
+        _rows.Clear();
+        OnPropertyChanged(nameof(HasFiles));
+    }
+
+    public void Update(InstallProgress progress)
+    {
+        Progress = progress.Fraction;
+        StatusText = progress.Total > 0
+            ? $"{progress.Stage} {progress.Completed}/{progress.Total}"
+            : progress.Stage;
+        SpeedText = InstallFileItem.FormatSpeed(progress.BytesPerSecond);
+        BytesPerSecond = progress.BytesPerSecond;
+        _rows.Update(progress.ActiveFiles);
+        OnPropertyChanged(nameof(HasFiles));
+    }
+}
+
+/// <summary>
 /// 实例页：左侧游戏目录（本地 .minecraft / 官方启动器目录 / 自定义目录），
 /// 右侧实例列表。安装新游戏可以同时装加载器，安装整合包支持本地压缩包。
 /// </summary>
@@ -204,6 +283,9 @@ public sealed class VersionsViewModel : ViewModelBase
     private readonly DownloadFileRows _modpackRows = new();
     private CancellationTokenSource? _modpackDownloadCts;
 
+    // 整合包并行安装：原版 / 加载器 / 整合包内容各自维护独立进度。
+    private bool _isParallelModpackInstall;
+
     private bool _suppressStackChanged;
 
     public VersionsViewModel(
@@ -260,6 +342,8 @@ public sealed class VersionsViewModel : ViewModelBase
         {
             LoaderCards.Add(new LoaderCardItem { Kind = kind, Title = ModLoaderService.DisplayName(kind) });
         }
+
+        ParallelPhases = new[] { GamePhase, LoaderPhase, ImportPhase };
 
         _stack.Changed += (_, _) =>
         {
@@ -693,6 +777,18 @@ public sealed class VersionsViewModel : ViewModelBase
 
     /// <summary>整合包下载 / 安装时的文件队列（单文件时只有一行）。</summary>
     public ObservableCollection<InstallFileItem> ModpackFiles => _modpackRows.Items;
+
+    /// <summary>并行安装中的原版任务。</summary>
+    public ModpackPhaseItem GamePhase { get; } = new("原版游戏文件");
+
+    /// <summary>并行安装中的加载器任务（没有加载器时隐藏）。</summary>
+    public ModpackPhaseItem LoaderPhase { get; } = new("模组加载器");
+
+    /// <summary>并行安装中的整合包内容任务。</summary>
+    public ModpackPhaseItem ImportPhase { get; } = new("整合包内容");
+
+    /// <summary>界面按块展示的三路任务。</summary>
+    public IReadOnlyList<ModpackPhaseItem> ParallelPhases { get; }
 
     public bool CanConfirmModpack =>
         !IsModpackInstalling &&
@@ -1701,6 +1797,13 @@ public sealed class VersionsViewModel : ViewModelBase
         return Path.GetExtension(name).Length == 0 ? name + ".zip" : name;
     }
 
+    /// <summary>把文件拖进窗口且被识别为整合包：关闭其它弹窗并打开安装确认。</summary>
+    public async Task OpenDroppedModpackAsync(string archivePath)
+    {
+        CloseDialogs();
+        await ShowModpackConfirmAsync(archivePath);
+    }
+
     /// <summary>读取整合包信息并打开安装确认弹窗（本地导入与在线下载共用）。</summary>
     private async Task ShowModpackConfirmAsync(string archivePath)
     {
@@ -1776,95 +1879,170 @@ public sealed class VersionsViewModel : ViewModelBase
 
             var fallback = string.IsNullOrWhiteSpace(ModpackInstanceName) ? ModpackTitle : ModpackInstanceName.Trim();
             var instanceId = _stack.Instances.CreateUniqueInstanceId(_stack.GameRoot, ModpackInstanceName, fallback);
-
-            // 原版与加载器（Fabric / Quilt / Forge / NeoForge）在内存里合并后直接装进实例目录，
-            // 不生成原版基底；Forge / NeoForge 的处理器在这一步执行。
-            GameVersionJson? loaderProfile = null;
-            string? loaderText = null;
+            var options = _stack.BuildInstallOptions();
+            var instanceDirectory = VersionRepository.VersionDirectory(_stack.GameRoot, instanceId);
 
             var baseVersion = await _stack.GetBaseVersionJsonAsync(info.GameVersion!);
 
+            GameVersionJson? loaderProfile = null;
+            string? loaderText = null;
+            ModpackImportResult? import = null;
+
+            // 和 PCL 一样三路并行：原版文件、加载器、整合包内容同时开始，互不等待；
+            // 三路都完成后再合并版本 JSON 并补齐加载器独有的依赖库。
+            ResetParallelProgress(loader is not null);
+            ModpackStatus = "并行安装：原版、加载器与整合包内容同时开始…";
+
+            using var cts = new CancellationTokenSource();
+            Exception? firstError = null;
+
+            async Task RunGuardedAsync(Func<Task> action)
+            {
+                try
+                {
+                    await action().ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    // 任意一路失败就取消另外两路，避免白等大文件下载。
+                    Interlocked.CompareExchange(ref firstError, ex, null);
+                    cts.Cancel();
+                    throw;
+                }
+            }
+
             try
             {
-                if (loader is { } parsed)
+                // 1) 原版：先按纯原版铺客户端 jar、依赖库与资源；
+                //    Forge 处理器随后可以直接复用已经下载好的库和客户端 jar。
+                var vanillaTask = RunGuardedAsync(async () =>
                 {
+                    var report = await _stack.Installer.InstallInstanceAsync(
+                        _stack.GameRoot, instanceId, baseVersion, null, options,
+                        new Progress<InstallProgress>(ReportInstallPhase), cts.Token).ConfigureAwait(false);
+
+                    if (!report.Success)
+                    {
+                        throw new InvalidOperationException($"原版文件安装失败：{report.Failed} 个文件未能下载");
+                    }
+                });
+
+                // 2) 加载器：Fabric / Quilt 只取 profile JSON；Forge / NeoForge 下载安装器并跑处理器。
+                //    处理器使用 .mclauncher 里的临时客户端 jar，避免和原版安装同时写同一个文件。
+                var loaderTask = RunGuardedAsync(async () =>
+                {
+                    if (loader is not { } parsed)
+                    {
+                        return;
+                    }
+
                     var loaderVersion = parsed.Version;
                     if (string.IsNullOrWhiteSpace(loaderVersion))
                     {
-                        var options = await _stack.ModLoaders.ListLoaderVersionsAsync(parsed.Kind, info.GameVersion!);
-                        loaderVersion = (options.FirstOrDefault(option => option.IsRecommended) ?? options.FirstOrDefault())?.Version
+                        var versions = await _stack.ModLoaders
+                            .ListLoaderVersionsAsync(parsed.Kind, info.GameVersion!, cts.Token)
+                            .ConfigureAwait(false);
+
+                        loaderVersion = (versions.FirstOrDefault(option => option.IsRecommended)
+                                         ?? versions.FirstOrDefault())?.Version
                                         ?? throw new InvalidOperationException(
                                             $"{ModLoaderService.DisplayName(parsed.Kind)} 没有支持 {info.GameVersion} 的版本");
                     }
 
                     loaderText = $"{ModLoaderService.DisplayName(parsed.Kind)} {loaderVersion}";
-                    ModpackStatus = $"正在安装 {loaderText}…";
 
                     loaderProfile = parsed.Kind is ModLoaderKind.Fabric or ModLoaderKind.Quilt
                         ? await _stack.ModLoaders.GetFabricLikeProfileAsync(
-                            parsed.Kind, info.GameVersion!, loaderVersion)
+                            parsed.Kind, info.GameVersion!, loaderVersion, cts.Token).ConfigureAwait(false)
                         : await _stack.ModLoaders.GetForgeLikeVersionAsync(
                             parsed.Kind,
                             _stack.GameRoot,
                             info.GameVersion!,
                             loaderVersion,
                             baseVersion,
-                            VersionRepository.VersionJarPath(_stack.GameRoot, instanceId),
-                            _stack.BuildInstallOptions(),
-                            new Progress<InstallProgress>(ReportModpackProgress));
-                }
-                else
+                            clientJarPath: null,
+                            options: options,
+                            progress: new Progress<InstallProgress>(ReportLoaderPhase),
+                            ct: cts.Token).ConfigureAwait(false);
+                });
+
+                // 3) 整合包内容：下载 mods / 资源包等文件并铺开 overrides，完全独立于原版安装。
+                var importRequest = new ModpackImportRequest
                 {
-                    ModpackStatus = $"正在安装原版 {info.GameVersion}…";
+                    ArchivePath = archivePath,
+                    GameRoot = _stack.GameRoot,
+                    InstanceDirectory = instanceDirectory,
+                    DownloadFiles = true,
+                    CurseForgeApiKey = _stack.Config.ResolveCurseForgeApiKey(),
+                };
+
+                // Progress 必须在 UI 线程创建，否则回调会落在后台线程直接改绑定属性。
+                var importProgress = new Progress<InstallProgress>(ReportImportPhase);
+
+                var importTask = RunGuardedAsync(async () =>
+                {
+                    import = await Task.Run(
+                            () => _stack.Modpacks.ImportAsync(importRequest, importProgress, cts.Token),
+                            cts.Token)
+                        .ConfigureAwait(false);
+
+                    if (!import.Success)
+                    {
+                        throw new InvalidOperationException(
+                            (import.Error ?? "整合包文件导入失败")
+                            + (import.Failed > 0 ? $"（{import.Failed} 个文件）" : string.Empty));
+                    }
+                });
+
+                try
+                {
+                    await Task.WhenAll(vanillaTask, loaderTask, importTask);
+                }
+                catch when (firstError is not null)
+                {
+                    // WhenAll 会包成 AggregateException；抛原始错误让界面文案保持具体。
+                    throw firstError;
                 }
 
-                var report = await _stack.Installer.InstallInstanceAsync(
-                    _stack.GameRoot, instanceId, baseVersion, loaderProfile,
-                    _stack.BuildInstallOptions(), new Progress<InstallProgress>(ReportModpackProgress));
+                _isParallelModpackInstall = false;
+                ModpackStatus = loaderProfile is null
+                    ? "正在合并原版文件…"
+                    : $"正在合并原版与 {loaderText}…";
 
-                if (!report.Success)
+                // 三路已经各自校验过下载结果；合并阶段只需要补缺失文件，
+                // 不再对几十万个已下载文件重算哈希，避免把并行省下的时间又花在磁盘上。
+                var finalOptions = new InstallOptions
                 {
-                    throw new InvalidOperationException($"安装失败：{report.Failed} 个文件未能下载");
+                    DownloadAssets = options.DownloadAssets,
+                    ExtractNatives = options.ExtractNatives,
+                    CreateLauncherProfiles = options.CreateLauncherProfiles,
+                    MaxParallel = options.MaxParallel,
+                    VerifyExisting = false,
+                };
+
+                var finalReport = await _stack.Installer.InstallInstanceAsync(
+                    _stack.GameRoot, instanceId, baseVersion, loaderProfile, finalOptions,
+                    new Progress<InstallProgress>(ReportModpackProgress), cts.Token);
+
+                if (!finalReport.Success)
+                {
+                    throw new InvalidOperationException($"安装失败：{finalReport.Failed} 个文件未能下载");
                 }
             }
             catch
             {
                 DeleteInstanceQuietly(instanceId);
                 throw;
+            }
+
+            if (import is null)
+            {
+                DeleteInstanceQuietly(instanceId);
+                throw new InvalidOperationException("整合包文件导入没有返回结果");
             }
 
             // 新实例默认开启版本隔离（mods / 存档 / 配置都放在 instances/<id> 下）。
             _stack.Instances.SetIsolation(_stack.GameRoot, instanceId, true);
-
-            ModpackStatus = "正在铺开整合包文件…";
-
-            ModpackImportResult import;
-            try
-            {
-                import = await _stack.Modpacks.ImportAsync(
-                    new ModpackImportRequest
-                    {
-                        ArchivePath = archivePath,
-                        GameRoot = _stack.GameRoot,
-                        InstanceDirectory = VersionRepository.VersionDirectory(_stack.GameRoot, instanceId),
-                        DownloadFiles = true,
-                        CurseForgeApiKey = _stack.Config.ResolveCurseForgeApiKey(),
-                    },
-                    new Progress<InstallProgress>(ReportModpackProgress));
-            }
-            catch
-            {
-                DeleteInstanceQuietly(instanceId);
-                throw;
-            }
-
-            if (!import.Success)
-            {
-                DeleteInstanceQuietly(instanceId);
-                throw new InvalidOperationException(
-                    (import.Error ?? "整合包文件导入失败")
-                    + (import.Failed > 0 ? $"（{import.Failed} 个文件）" : string.Empty));
-            }
 
             _stack.Config.Settings.SelectedInstanceId = instanceId;
             _stack.Config.Save();
@@ -1889,6 +2067,7 @@ public sealed class VersionsViewModel : ViewModelBase
         }
         finally
         {
+            _isParallelModpackInstall = false;
             ModpackSpeedText = string.Empty;
             _modpackRows.Clear();
             IsModpackInstalling = false;
@@ -1924,6 +2103,79 @@ public sealed class VersionsViewModel : ViewModelBase
         }
     }
 
+    // ---------------------------------------------------------------- 并行安装进度
+
+    private void ResetParallelProgress(bool hasLoader)
+    {
+        GamePhase.Reset();
+        GamePhase.IsVisible = true;
+        LoaderPhase.Reset();
+        LoaderPhase.IsVisible = hasLoader;
+        ImportPhase.Reset();
+        ImportPhase.IsVisible = true;
+        _isParallelModpackInstall = true;
+    }
+
+    private void ReportInstallPhase(InstallProgress progress)
+    {
+        if (!_isParallelModpackInstall)
+        {
+            return;
+        }
+
+        GamePhase.Update(progress);
+        UpdateParallelStatus();
+    }
+
+    private void ReportLoaderPhase(InstallProgress progress)
+    {
+        if (!_isParallelModpackInstall)
+        {
+            return;
+        }
+
+        LoaderPhase.Update(progress);
+        UpdateParallelStatus();
+    }
+
+    private void ReportImportPhase(InstallProgress progress)
+    {
+        if (!_isParallelModpackInstall)
+        {
+            return;
+        }
+
+        ImportPhase.Update(progress);
+        UpdateParallelStatus();
+    }
+
+    /// <summary>总进度按当前显示的各路取平均；每一路的细节由各自的块展示。</summary>
+    private void UpdateParallelStatus()
+    {
+        if (!_isParallelModpackInstall)
+        {
+            return;
+        }
+
+        var visible = ParallelPhases.Where(phase => phase.IsVisible).ToList();
+        ModpackProgress = visible.Count == 0 ? 0 : visible.Average(phase => phase.Progress);
+        ModpackSpeedText = InstallFileItem.FormatSpeed(visible.Sum(phase => phase.BytesPerSecond));
+
+        ModpackStatus = LoaderPhase.IsVisible
+            ? "并行安装进行中：原版、加载器与整合包内容同时下载…"
+            : "并行安装进行中：原版与整合包内容同时下载…";
+    }
+
+    /// <summary>关闭弹窗时收起三路进度块，避免下次打开残留上一次的状态。</summary>
+    private void HideParallelPhases()
+    {
+        foreach (var phase in ParallelPhases)
+        {
+            phase.Reset();
+            phase.IsVisible = false;
+        }
+    }
+
     // ---------------------------------------------------------------- 弹窗
 
     private void CloseDialogs()
@@ -1940,6 +2192,7 @@ public sealed class VersionsViewModel : ViewModelBase
         ModpackDownloadSpeedText = string.Empty;
         ModpackSpeedText = string.Empty;
         _modpackRows.Clear();
+        HideParallelPhases();
         Download.Close();
         OnPropertyChanged(nameof(IsAnyDialogOpen));
     }

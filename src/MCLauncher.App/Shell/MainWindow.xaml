@@ -17,6 +17,11 @@
         UseLayoutRounding="True"
         SnapsToDevicePixels="True"
         FontFamily="Microsoft YaHei UI, Microsoft YaHei, Segoe UI"
+        AllowDrop="True"
+        DragEnter="OnFileDragEnter"
+        DragOver="OnFileDragOver"
+        DragLeave="OnFileDragLeave"
+        Drop="OnFileDrop"
         SourceInitialized="OnSourceInitialized">
     <WindowChrome.WindowChrome>
         <WindowChrome CaptionHeight="0"
@@ -151,20 +156,20 @@
             </Border>
 
             <!-- 更新抽屉：有更新时从右侧滑出，点正文直接下载，启动 5 秒后自动缩回 -->
-            <Grid Width="300" HorizontalAlignment="Right" VerticalAlignment="Top"
+            <Grid Width="336" HorizontalAlignment="Right" VerticalAlignment="Top"
                   Margin="0,14,0,0"
                   Panel.ZIndex="90"
                   Visibility="{Binding HasUpdate, Converter={StaticResource BoolToVis}}">
 
                 <Button x:Name="UpdateDrawer"
-                        MinHeight="96"
+                        MinHeight="104"
                         Command="{Binding UpdateActionCommand}"
                         ToolTip="点击下载并更新启动器">
                     <Button.Style>
                         <Style TargetType="Button" BasedOn="{StaticResource DrawerSurfaceButton}">
                             <Setter Property="RenderTransform">
                                 <Setter.Value>
-                                    <TranslateTransform X="300"/>
+                                    <TranslateTransform X="336"/>
                                 </Setter.Value>
                             </Setter>
                             <Style.Triggers>
@@ -187,7 +192,7 @@
                                             <Storyboard>
                                                 <DoubleAnimation
                                                     Storyboard.TargetProperty="(UIElement.RenderTransform).(TranslateTransform.X)"
-                                                    To="300" Duration="0:0:0.25">
+                                                    To="336" Duration="0:0:0.25">
                                                     <DoubleAnimation.EasingFunction>
                                                         <CubicEase EasingMode="EaseIn"/>
                                                     </DoubleAnimation.EasingFunction>
@@ -200,13 +205,26 @@
                         </Style>
                     </Button.Style>
 
-                    <StackPanel Margin="28,14,16,14">
-                        <TextBlock Text="{Binding UpdateTitle}"
-                                   Foreground="#FFFFD400" FontSize="14" FontWeight="SemiBold"
-                                   TextWrapping="Wrap"/>
+                    <StackPanel Margin="28,12,16,12">
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="{Binding UpdateTitle}"
+                                       Foreground="#FFFFD400" FontSize="14" FontWeight="SemiBold"
+                                       TextWrapping="Wrap" VerticalAlignment="Center"/>
+                            <!-- 整块抽屉都可点，这里只是把「可点击更新」做成明确的操作提示 -->
+                            <Border Grid.Column="1" Margin="10,0,0,0" Padding="8,3"
+                                    VerticalAlignment="Center"
+                                    Background="#26FFD400" BorderBrush="#66FFD400"
+                                    BorderThickness="1" CornerRadius="9">
+                                <TextBlock Text="更新 ›" Foreground="#FFFFD400" FontSize="11"/>
+                            </Border>
+                        </Grid>
                         <TextBlock Text="{Binding UpdateMessage}"
-                                   Foreground="#99FFD400" FontSize="11.5" Margin="0,6,0,0"
-                                   TextWrapping="Wrap" MaxHeight="96"/>
+                                   Foreground="#B3FFD400" FontSize="11.5" Margin="0,8,0,0"
+                                   TextWrapping="Wrap" LineHeight="17" MaxHeight="72"/>
                     </StackPanel>
                 </Button>
 
@@ -254,6 +272,123 @@
         <views:SetupView Grid.RowSpan="2" Panel.ZIndex="110"
                          DataContext="{Binding Setup}"
                          Visibility="{Binding IsOpen, Converter={StaticResource BoolToVis}}"/>
+
+        <!-- ===== 拖入文件时的提示遮罩：松开即开始识别 ===== -->
+        <Border x:Name="DropHint" Grid.RowSpan="2" Panel.ZIndex="140"
+                Background="#66000000" IsHitTestVisible="False"
+                Visibility="Collapsed">
+            <Border Width="430" Height="190"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    Background="#F5FFFFFF" CornerRadius="10"
+                    BorderBrush="#FFD400" BorderThickness="2">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="&#xE896;" FontFamily="Segoe MDL2 Assets" FontSize="36"
+                               Foreground="#C9A400" HorizontalAlignment="Center"/>
+                    <TextBlock Text="松开以安装到启动器" FontSize="15" FontWeight="SemiBold"
+                               Foreground="#2A2A2A" Margin="0,10,0,0" HorizontalAlignment="Center"/>
+                    <TextBlock Text="支持模组 / 资源包 / 光影包 / 整合包" FontSize="11.5"
+                               Foreground="#7A7A7A" Margin="0,5,0,0" HorizontalAlignment="Center"/>
+                </StackPanel>
+            </Border>
+        </Border>
+
+        <!-- ===== 拖放安装：选择实例后把文件复制到对应资源目录 ===== -->
+        <Grid Grid.RowSpan="2" Panel.ZIndex="95" Background="#66000000"
+              DataContext="{Binding Drop}"
+              Visibility="{Binding IsOpen, Converter={StaticResource BoolToVis}}">
+            <Border Width="580" MaxHeight="540" Background="White" CornerRadius="8" Padding="18,16"
+                    HorizontalAlignment="Center" VerticalAlignment="Center"
+                    BorderBrush="#D8D8D8" BorderThickness="1">
+                <Grid>
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="*"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+
+                    <ScrollViewer Grid.Row="0" VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel>
+                            <TextBlock Text="拖入的文件" FontSize="16" FontWeight="SemiBold"/>
+                            <TextBlock Text="{Binding Title}" Margin="0,8,0,0"
+                                       FontSize="13.5" FontWeight="SemiBold"
+                                       Foreground="#2A2A2A" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding Summary}" Margin="0,4,0,0"
+                                       FontSize="12" Foreground="#5A5A5A" TextWrapping="Wrap"/>
+                            <TextBlock Text="{Binding Note}" Margin="0,6,0,0"
+                                       FontSize="12" Foreground="#B26A00" TextWrapping="Wrap"
+                                       Visibility="{Binding HasNote, Converter={StaticResource BoolToVis}}"/>
+
+                            <TextBlock Text="文件" Margin="0,12,0,4" FontSize="13" Foreground="#5A5A5A"/>
+                            <ItemsControl ItemsSource="{Binding Files}">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border Background="#F7F8FA" CornerRadius="4"
+                                                Padding="8,6" Margin="0,0,0,4">
+                                            <Grid>
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*"/>
+                                                    <ColumnDefinition Width="Auto"/>
+                                                </Grid.ColumnDefinitions>
+                                                <StackPanel>
+                                                    <TextBlock Text="{Binding FileName}" FontSize="12.5"
+                                                               Foreground="#2A2A2A"
+                                                               TextTrimming="CharacterEllipsis"/>
+                                                    <TextBlock Text="{Binding Note}" FontSize="10.5"
+                                                               Foreground="#9A5B00" TextWrapping="Wrap"
+                                                               Margin="0,2,0,0"
+                                                               Visibility="{Binding HasNote, Converter={StaticResource BoolToVis}}"/>
+                                                </StackPanel>
+                                                <TextBlock Grid.Column="1" Text="{Binding KindText}"
+                                                           FontSize="11" Foreground="#5A5A5A"
+                                                           Margin="10,0,0,0" VerticalAlignment="Center"/>
+                                            </Grid>
+                                        </Border>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <StackPanel Visibility="{Binding HasInstallableFiles, Converter={StaticResource BoolToVis}}">
+                                <TextBlock Text="安装到实例" Margin="0,12,0,4" FontSize="13" Foreground="#5A5A5A"/>
+                                <ListBox ItemsSource="{Binding Instances}"
+                                         SelectedItem="{Binding SelectedInstance, Mode=TwoWay}"
+                                         MaxHeight="150" BorderBrush="#E2E6EC" BorderThickness="1"
+                                         ScrollViewer.VerticalScrollBarVisibility="Auto">
+                                    <ListBox.ItemTemplate>
+                                        <DataTemplate>
+                                            <StackPanel Margin="2,2">
+                                                <TextBlock Text="{Binding Display}" FontSize="12.5"
+                                                           Foreground="#2A2A2A"/>
+                                                <TextBlock Text="{Binding Subtitle}" FontSize="10.5"
+                                                           Foreground="#7A7A7A"/>
+                                            </StackPanel>
+                                        </DataTemplate>
+                                    </ListBox.ItemTemplate>
+                                </ListBox>
+
+                                <TextBlock Text="{Binding DestinationText}" Margin="0,8,0,0"
+                                           FontSize="11.5" Foreground="#3A6EA5" TextWrapping="Wrap"/>
+                            </StackPanel>
+                            <TextBlock Text="{Binding StatusText}" Margin="0,8,0,0"
+                                       FontSize="12" Foreground="#5A5A5A" TextWrapping="Wrap"
+                                       MinHeight="16"/>
+                        </StackPanel>
+                    </ScrollViewer>
+
+                    <StackPanel Grid.Row="1" Orientation="Horizontal"
+                                HorizontalAlignment="Right" Margin="0,12,0,0">
+                        <Button Style="{StaticResource SkinButton}" Content="{Binding CloseButtonText}"
+                                Width="76" Height="28" FontSize="13"
+                                Command="{Binding CloseCommand}"
+                                IsEnabled="{Binding CanClose}"/>
+                        <Button Style="{StaticResource SkinButton}" Content="安装"
+                                Width="76" Height="28" FontSize="13" Margin="8,0,0,0"
+                                Command="{Binding InstallCommand}"
+                                IsEnabled="{Binding CanInstall}"
+                                Visibility="{Binding HasInstallableFiles, Converter={StaticResource BoolToVis}}"/>
+                    </StackPanel>
+                </Grid>
+            </Border>
+        </Grid>
 
         <!-- ===== 崩溃界面：游戏异常退出后覆盖整个窗口 ===== -->
         <Grid Grid.RowSpan="2" Panel.ZIndex="100" Background="#66000000"

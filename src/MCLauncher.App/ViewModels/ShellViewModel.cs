@@ -53,6 +53,7 @@ public sealed class ShellViewModel : ViewModelBase
     private string? _updateUrl;
 
     private readonly LauncherUpdater? _updater;
+    private readonly Action<string> _openModpack;
     private LauncherUpdate? _updateSource;
     private bool _updateReady;
     private bool _isUpdateDrawerOpen;
@@ -66,6 +67,8 @@ public sealed class ShellViewModel : ViewModelBase
         int initialHeight,
         CrashOverlayViewModel crash,
         SetupViewModel setup,
+        DropInstallViewModel drop,
+        Action<string> openModpack,
         LauncherUpdater? updater = null)
     {
         _pageFactory = pageFactory;
@@ -77,6 +80,8 @@ public sealed class ShellViewModel : ViewModelBase
         InitialHeight = initialHeight;
         Crash = crash;
         Setup = setup;
+        Drop = drop;
+        _openModpack = openModpack;
         _updater = updater;
 
         OpenNoticeCommand = new RelayCommand(() => OpenUrl(_noticeUrl));
@@ -91,6 +96,9 @@ public sealed class ShellViewModel : ViewModelBase
 
     /// <summary>首次启动的初始化设置，未完成时盖在主界面上。</summary>
     public SetupViewModel Setup { get; }
+
+    /// <summary>拖放文件后的实例选择弹层。</summary>
+    public DropInstallViewModel Drop { get; }
 
     public ObservableCollection<NavItem> NavItems { get; }
 
@@ -237,6 +245,63 @@ public sealed class ShellViewModel : ViewModelBase
         var dismiss = _noticeDismiss;
         _noticeDismiss = null;
         dismiss?.Invoke();
+    }
+
+    /// <summary>
+    /// 处理拖入窗口的文件：单个整合包直接进入整合包安装确认，
+    /// 其余资源弹出实例选择；整合包混在多个文件里时提示需要单独拖入。
+    /// </summary>
+    public async Task HandleDropAsync(IReadOnlyList<string> paths)
+    {
+        if (paths.Count == 0 || Drop.IsBusy)
+        {
+            return;
+        }
+
+        List<DroppedFileInfo> files;
+        try
+        {
+            files = await Task.Run(() => paths.Select(DroppedFileClassifier.Classify).ToList());
+        }
+        catch (Exception ex)
+        {
+            StatusText = "识别拖入的文件失败：" + ex.Message;
+            return;
+        }
+
+        if (files.Count == 1 && files[0].Kind == DroppedFileKind.Modpack)
+        {
+            // 整合包走独立的安装确认弹窗，先把拖放弹层收起来。
+            Drop.Hide();
+            _openModpack(files[0].Path);
+            return;
+        }
+
+        try
+        {
+            var modpacks = files.Where(file => file.Kind == DroppedFileKind.Modpack).ToList();
+            var visible = modpacks.Count == 0
+                ? files
+                : files.Where(file => file.Kind != DroppedFileKind.Modpack).ToList();
+
+            var note = modpacks.Count > 0
+                ? $"整合包一次只能安装一个，请单独拖入「{modpacks[0].FileName}」。"
+                : string.Empty;
+
+            if (Drop.IsOpen)
+            {
+                // 弹层已经打开：继续拖入的文件直接追加到列表。
+                Drop.AddFiles(visible, note);
+            }
+            else
+            {
+                Drop.Show(visible, note);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = "处理拖入的文件失败：" + ex.Message;
+        }
     }
 
     /// <summary>显示更新抽屉；<paramref name="source"/> 带附件信息时支持原地自更新。</summary>

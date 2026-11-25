@@ -113,6 +113,16 @@ public partial class App : Application
             var homePage = pageFactory.Create(PageFactory.HomePageId);
             var crashOverlay = new CrashOverlayViewModel(stack);
 
+            // 拖放安装弹层需要回写外壳状态栏，先创建回调再创建外壳。
+            ShellViewModel? shellViewModelRef = null;
+            var dropInstall = new DropInstallViewModel(stack, message =>
+            {
+                if (shellViewModelRef is not null)
+                {
+                    shellViewModelRef.StatusText = message;
+                }
+            });
+
             var shellViewModel = new ShellViewModel(
                 PageFactory.NavItems,
                 pageFactory.Create,
@@ -121,7 +131,10 @@ public partial class App : Application
                 config.Settings.WindowHeight,
                 crashOverlay,
                 setup,
+                dropInstall,
+                pageFactory.OpenModpackFromDrop,
                 updater);
+            shellViewModelRef = shellViewModel;
 
             // 崩溃界面的「重新启动」：回到首页并用当前实例再启动一次。
             crashOverlay.RestartAction = () =>
@@ -348,11 +361,7 @@ public partial class App : Application
             return;
         }
 
-        var detail = TrimForBanner(update.Notes) is { Length: > 0 } notes
-            ? notes
-            : TrimForBanner(update.Title);
-
-        shell.ShowUpdate($"发现新版本 {update.Version}", detail, update.Url, update);
+        shell.ShowUpdate($"发现新版本 {update.Version}", "点击此处下载并更新到最新版本", update.Url, update);
 
         log.Info($"发现启动器新版本：{update.Version}（当前 {current}）");
     }
@@ -369,21 +378,6 @@ public partial class App : Application
         return version.Revision > 0
             ? $"{version.Major}.{version.Minor}.{version.Build}.{version.Revision}"
             : $"{version.Major}.{version.Minor}.{version.Build}";
-    }
-
-    /// <summary>发布说明是多行 Markdown，横幅只保留一段单行摘要。</summary>
-    private static string TrimForBanner(string? text)
-    {
-        if (string.IsNullOrWhiteSpace(text))
-        {
-            return string.Empty;
-        }
-
-        var normalized = string.Join(
-            " ",
-            text.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)).Trim();
-
-        return normalized.Length <= 200 ? normalized : normalized[..200] + "…";
     }
 
     private static async Task PrefetchManifestAsync(LauncherStack stack, ILogger log)

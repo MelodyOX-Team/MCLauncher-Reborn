@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.IO.Compression;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -490,29 +491,64 @@ public sealed partial class ModpackImporter
         var manifest = JsonUtil.Deserialize<CurseForgeManifest>(json)
                        ?? throw new InvalidDataException("manifest.json 解析失败");
 
-        var plan = new List<(string Path, string Url, string? Sha1, long Size)>();
+        var files = manifest.Files ?? new List<CurseForgeFile>();
+        var planSlots = new (string Path, string Url, string? Sha1, long Size)?[files.Count];
         var warnings = new List<string>();
 
         // projectId → classId：同一项目可能有多个文件，避免重复查询项目分类。
-        var classIdCache = new Dictionary<int, int>();
+        // 并发解析时用 ConcurrentDictionary，避免多线程同时写入。
+        var classIdCache = new ConcurrentDictionary<int, int>();
 
-        foreach (var file in manifest.Files ?? new List<CurseForgeFile>())
+        progress?.Report(new InstallProgress
         {
-            var resolved = await ResolveCurseForgeFileAsync(
-                file.ProjectId,
-                file.FileId,
-                request.CurseForgeApiKey!,
-                classIdCache,
-                ct).ConfigureAwait(false);
+            Stage = "解析 CurseForge 文件",
+            Completed = 0,
+            Total = files.Count,
+        });
 
-            if (resolved is null)
+        var resolvedCount = 0;
+
+        // 逐条串行解析几百个文件时界面会长时间没有任何反馈；
+        // 这里按文件并发解析，并持续上报「解析 CurseForge 文件 x/y」。
+        await Parallel.ForEachAsync(
+            Enumerable.Range(0, files.Count),
+            new ParallelOptions { MaxDegreeOfParallelism = 4, CancellationToken = ct },
+            async (index, token) =>
             {
-                warnings.Add($"无法解析 CurseForge 文件（projectID={file.ProjectId}, fileID={file.FileId}）");
-                continue;
-            }
+                var file = files[index];
+                var resolved = await ResolveCurseForgeFileAsync(
+                    file.ProjectId,
+                    file.FileId,
+                    request.CurseForgeApiKey!,
+                    classIdCache,
+                    token).ConfigureAwait(false);
 
-            plan.Add(resolved.Value);
-        }
+                if (resolved is null)
+                {
+                    lock (warnings)
+                    {
+                        warnings.Add(
+                            $"无法解析 CurseForge 文件（projectID={file.ProjectId}, fileID={file.FileId}）");
+                    }
+                }
+                else
+                {
+                    planSlots[index] = resolved.Value;
+                }
+
+                var done = Interlocked.Increment(ref resolvedCount);
+                progress?.Report(new InstallProgress
+                {
+                    Stage = "解析 CurseForge 文件",
+                    Completed = done,
+                    Total = files.Count,
+                });
+            }).ConfigureAwait(false);
+
+        var plan = planSlots
+            .Where(slot => slot is not null)
+            .Select(slot => slot!.Value)
+            .ToList();
 
         var result = request.DownloadFiles && plan.Count > 0
             ? await DownloadPlannedFilesAsync(request, plan, progress, ct).ConfigureAwait(false)
@@ -821,11 +857,18 @@ public sealed partial class ModpackImporter
                 : null;
 
             // CurseForge 不直接给相对路径，只能按项目分类 / 文件类型猜目录。
-            // 光影包与资源包都是 zip，不能一律放进 resourcepacks。
-            var classId = await GetCurseForgeClassIdAsync(projectId, apiKey, classIdCache, ct)
-                .ConfigureAwait(false);
-            var directory = GuessCurseForgeDirectory(fileName!, classId);
-            return (Path.Combine(directory, fileName!), url!, sha1, size);
+            // 光影包与资源包都是 zip，不能一律放进 resourcepacks；
+            // 只有 zip / mcpack 需要多查一次项目分类，.jar 直接进 mods，避免成倍增加 API 请求。
+            var classId = -1;
+            if (fileName!.EndsWith(".zip", StringComparison.OrdinalIgnoreCase)
+                || fileName.EndsWith(".mcpack", StringComparison.OrdinalIgnoreCase))
+            {
+                classId = await GetCurseForgeClassIdAsync(projectId, apiKey, classIdCache, ct)
+                    .ConfigureAwait(false);
+            }
+
+            var directory = GuessCurseForgeDirectory(fileName, classId);
+            return (Path.Combine(directory, fileName), url!, sha1, size);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
